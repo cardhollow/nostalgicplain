@@ -1,0 +1,4856 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Infinite Plain</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#0d0e12}
+body{font-family:monospace}
+canvas{display:block;width:100%;height:100%;touch-action:none}
+#hud{
+ position:fixed;left:12px;top:12px;z-index:20;
+ padding:8px 12px;border-radius:9px;
+ background:rgba(20,16,10,.55);display:none;
+ border:1px solid rgba(255,243,198,.24);
+ color:#fff1bd;font:12px/1.45 monospace;
+ text-shadow:0 2px 3px rgba(0,0,0,.75);
+ pointer-events:none;
+ backdrop-filter:blur(4px);
+}
+#cross{
+ position:fixed;left:50%;top:50%;z-index:21;display:none;
+ width:5px;height:5px;margin:-2.5px;border-radius:50%;
+ background:rgba(255,243,198,.55);pointer-events:none
+}
+#jump{
+ display:none;position:fixed;right:18px;bottom:18px;z-index:30;
+ width:80px;height:80px;border-radius:50%;
+ border:1px solid rgba(255,240,185,.35);
+ background:rgba(45,35,12,.38);
+ color:#fff0bd;font:bold 13px monospace
+}
+@media (max-width: 768px) {#jump {display: block;}}
+#fade{
+ position:fixed;inset:0;z-index:10;pointer-events:none;
+ background:radial-gradient(ellipse at center,transparent 46%,rgba(5,3,1,.25) 100%);
+ background-color:transparent;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud">CLICK ANYWHERE TO AWAKEN WORLD & SOUNDSCAPE...</div>
+<div id="cross"></div>
+<button id="jump">JUMP</button>
+<div id="fade"></div>
+
+<script>
+"use strict";
+
+const canvas=document.getElementById("c");
+const hud=document.getElementById("hud");
+
+const gl=canvas.getContext("webgl2",{
+ antialias:false,
+ alpha:false,
+ depth:true,
+ stencil:false,
+ powerPreference:"high-performance"
+});
+
+if(!gl){
+ hud.textContent="WEBGL2 IS NOT AVAILABLE";
+ throw new Error("WebGL2 unavailable");
+}
+
+function compile(type,src){
+ const s=gl.createShader(type);
+ gl.shaderSource(s,src);
+ gl.compileShader(s);
+ if(!gl.getShaderParameter(s,gl.COMPILE_STATUS)){
+  const msg=gl.getShaderInfoLog(s)||"shader compile error";
+  console.error(msg);
+  throw new Error(msg);
+ }
+ return s;
+}
+
+function makeProgram(vs,fs){
+ const p=gl.createProgram();
+ gl.attachShader(p,compile(gl.VERTEX_SHADER,vs));
+ gl.attachShader(p,compile(gl.FRAGMENT_SHADER,fs));
+ gl.linkProgram(p);
+ if(!gl.getProgramParameter(p,gl.LINK_STATUS)){
+  throw new Error(gl.getProgramInfoLog(p)||"program link error");
+ }
+ return p;
+}
+
+const skyProgram=makeProgram(
+`#version 300 es
+precision highp float;
+layout(location=0) in vec2 aPos;
+out vec2 vUv;
+
+void main(){
+ vUv=aPos;
+ gl_Position=vec4(aPos,1.,1.);
+}`,
+`#version 300 es
+precision highp float;
+in vec2 vUv;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uTime;
+uniform float uRain;
+
+uniform vec3 uSkyTop;
+uniform vec3 uSkyHorizon;
+uniform vec3 uSunDir;
+uniform vec3 uSunColor;
+uniform vec3 uMoonDir;
+uniform vec3 uMoonColor;
+uniform vec3 uCloudColor;
+uniform float uNightFactor;
+
+out vec4 outColor;
+
+float hash(vec2 p){
+ return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453123);
+}
+
+float noise(vec2 p){
+ vec2 i=floor(p),f=fract(p);
+ vec2 u=f*f*(3.-2.*f);
+ return mix(
+  mix(hash(i+vec2(0.,0.)),hash(i+vec2(1.,0.)),u.x),
+  mix(hash(i+vec2(0.,1.)),hash(i+vec2(1.,1.)),u.x),
+  u.y
+ );
+}
+
+float fbm(vec2 p){
+ float f=0.;
+ f+=.5000*noise(p);p*=2.02;
+ f+=.2500*noise(p);p*=2.03;
+ f+=.1250*noise(p);p*=2.01;
+ f+=.0625*noise(p);
+ return f/.9375;
+}
+
+float hash3(vec3 p){
+ p=fract(p*vec3(443.8975,397.2973,491.1871));
+ p+=dot(p,p.yxz+19.19);
+ return fract((p.x+p.y)*p.z);
+}
+
+void main(){
+ vec4 target=inverse(uProj)*vec4(vUv,1.0,1.0);
+ vec3 viewDir=target.xyz/target.w;
+ vec3 worldDir=(inverse(uView)*vec4(viewDir,0.0)).xyz;
+ vec3 rd=normalize(worldDir);
+
+ vec3 horizonCol=mix(uSkyHorizon,vec3(0.18,0.20,0.24),uRain*.75);
+ vec3 topCol=mix(uSkyTop,vec3(0.08,0.10,0.12),uRain*.75);
+
+ float g=pow(1.0-max(rd.y,0.0),2.2);
+ vec3 c=mix(topCol,horizonCol,g);
+
+ if(uNightFactor>0.02&&rd.y>0.0){
+  vec3 starCoord=floor(rd*280.0);
+  float h=hash3(starCoord);
+
+  if(h>0.978){
+   float speed1=.7+hash3(starCoord+17.31)*2.8;
+   float speed2=1.5+hash3(starCoord+43.72)*5.0;
+   float phase1=hash3(starCoord+81.14)*6.2831;
+   float phase2=hash3(starCoord+126.57)*6.2831;
+
+   float w1=sin(uTime*speed1+phase1);
+   float w2=sin(uTime*speed2+phase2);
+   float w3=sin(uTime*(0.25+hash3(starCoord+211.8)*1.2));
+
+   float twinkle=.5+.5*(w1*.55+w2*.30+w3*.15);
+   twinkle=smoothstep(.05,.95,twinkle);
+
+   float starIntensity=
+    pow((h-.978)/.022,2.0)*
+    (.18+.82*twinkle);
+
+   float fade=
+    smoothstep(0.0,.25,rd.y)*
+    uNightFactor*
+    (1.0-uRain*.9);
+
+   c+=vec3(.85,.92,1.0)*
+      starIntensity*
+      fade*
+      1.8;
+  }
+
+  float mTime=uTime*.40;
+  float mCycle=floor(mTime);
+  float mProgress=fract(mTime);
+  float mHash=hash(vec2(mCycle,91.17));
+
+  if(mHash>.35&&mProgress<.35){
+   float normP=mProgress/.35;
+   vec2 mStart=vec2(
+    hash(vec2(mCycle,1.3))*3.0-1.5,
+    hash(vec2(mCycle,2.4))*.4+.35
+   );
+
+   vec2 mDir=normalize(vec2(
+    hash(vec2(mCycle,3.5))-.5,
+    -abs(hash(vec2(mCycle,4.6)))-.3
+   ));
+
+   float mLen=.38;
+
+   vec2 skyProj=rd.xz/(rd.y+.25);
+   vec2 headPos=mStart+mDir*(normP*2.4);
+   vec2 tailPos=headPos-mDir*mLen;
+
+   vec2 pa=skyProj-tailPos;
+   vec2 ba=headPos-tailPos;
+
+   float hSeg=clamp(dot(pa,ba)/dot(ba,ba),0.0,1.0);
+   float dist=length(pa-ba*hSeg);
+
+   if(dist<.016){
+    float trail=hSeg*(1.0-dist/.016);
+    float meteorFade=
+     sin(normP*3.14159)*
+     uNightFactor*
+     (1.0-uRain);
+
+    c+=vec3(.9,.95,1.0)*
+       trail*
+       meteorFade*
+       4.0;
+   }
+  }
+ }
+
+ float sunDot=max(dot(rd,uSunDir),0.0);
+ float sunDisk=pow(sunDot,1024.0)*(1.0-uRain*.95);
+ float sunHalo=pow(sunDot,24.0)*.45*(1.0-uRain*.8);
+ float sunScatter=pow(sunDot,6.0)*.15*(1.0-uRain*.7);
+
+ c+=uSunColor*sunDisk*2.8;
+ c+=uSunColor*sunHalo;
+ c+=mix(uSunColor,uSkyHorizon,.5)*sunScatter;
+
+ float moonDot=max(dot(rd,uMoonDir),0.0);
+ float moonDisk=pow(moonDot,1200.0)*uNightFactor*(1.0-uRain*.95);
+ float moonHalo=pow(moonDot,32.0)*.22*uNightFactor*(1.0-uRain*.85);
+
+ c+=uMoonColor*moonDisk*2.2;
+ c+=uMoonColor*moonHalo;
+
+ if(rd.y>0.0){
+  float t=1.8/rd.y;
+  vec2 p=rd.xz*t*.16;
+  p+=uTime*(.012+uRain*.05);
+
+  float cl=fbm(p);
+  cl=smoothstep(.30-uRain*.20,.76-uRain*.25,cl);
+  float cloudFade=smoothstep(0.0,.18,rd.y);
+
+  vec3 baseCloud=mix(
+   uCloudColor,
+   vec3(.25,.28,.32),
+   uRain
+  );
+
+  float sunCloudLight=
+   pow(max(dot(rd,uSunDir),0.0),4.0)*.45;
+
+  float moonCloudLight=
+   pow(max(dot(rd,uMoonDir),0.0),4.0)*
+   .30*
+   uNightFactor;
+
+  vec3 finalCloudCol=
+   baseCloud+
+   uSunColor*sunCloudLight+
+   uMoonColor*moonCloudLight;
+
+  c=mix(
+   c,
+   finalCloudCol,
+   cl*cloudFade*(.75+uRain*.25)
+  );
+ }
+
+ outColor=vec4(c,1.0);
+}`
+);
+
+const terrainProgram=makeProgram(
+`#version 300 es
+precision highp float;
+layout(location=0) in vec3 aPos;
+layout(location=1) in float aShade;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out float shade;
+out float heightValue;
+out float vDist;
+
+void main(){
+ shade=aShade;
+ heightValue=aPos.y;
+
+ vec4 viewPos=uView*vec4(aPos,1.);
+ vDist=length(viewPos.xyz);
+
+ gl_Position=uProj*viewPos;
+}`,
+`#version 300 es
+precision mediump float;
+
+in float shade;
+in float heightValue;
+in float vDist;
+
+uniform vec3 uFogColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSunColor;
+uniform vec3 uSunDir;
+
+out vec4 outColor;
+
+void main(){
+ vec3 low=vec3(.20,.32,.08);
+ vec3 high=vec3(.38,.48,.15);
+
+ float h=clamp(heightValue*.08,0.,1.);
+ vec3 baseColor=mix(low,high,h);
+
+ float lightIntensity=
+  shade*
+  (.55+.45*max(0.0,uSunDir.y));
+
+ vec3 c=
+  baseColor*
+  (uAmbientColor+uSunColor*lightIntensity);
+
+ float fog=smoothstep(35.0,110.0,vDist);
+ c=mix(c,uFogColor,fog);
+
+ outColor=vec4(c,1.);
+}`
+);
+
+const grassVerts=[];
+
+function addBlade(angle,w,h,lean,x,z){
+ const c=Math.cos(angle),s=Math.sin(angle);
+ const sx=-s*w,sz=c*w;
+
+ grassVerts.push(
+  x-sx,0,z-sz,
+  x+sx,0,z+sz,
+  x+lean*c,h,z+lean*s
+ );
+}
+
+addBlade(.15,.075,.72,.07,0,0);
+addBlade(1.05,.070,.58,-.05,.05,-.02);
+addBlade(1.98,.064,.48,.05,-.045,.035);
+addBlade(2.80,.072,.66,-.07,.035,.055);
+addBlade(3.66,.056,.42,.04,-.055,-.045);
+addBlade(4.35,.068,.61,.06,.06,.02);
+addBlade(5.35,.060,.50,-.04,-.02,-.065);
+
+const grassProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec3 aBlade;
+layout(location=1) in vec4 iTransform;
+layout(location=2) in vec3 iVar;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uTime;
+
+out vec3 grassColor;
+out float hOut;
+out float vDist;
+
+void main(){
+ float h=clamp(aBlade.y/1.0,0.,1.);
+
+ float co=cos(iVar.x);
+ float si=sin(iVar.x);
+
+ float lx=aBlade.x*co-aBlade.z*si;
+ float lz=aBlade.x*si+aBlade.z*co;
+
+ float px=iTransform.x;
+ float py=iTransform.y;
+ float pz=iTransform.z;
+ float scale=iTransform.w;
+
+ float w1=sin(uTime*.72+px*.055+pz*.024);
+ float w2=sin(uTime*1.15-px*.019+pz*.068);
+ float gust=.72+.28*sin(uTime*.19+px*.009-pz*.006);
+
+ float bendX=(w1*.105+w2*.032)*gust*h*h;
+ float bendZ=(w1*.052-w2*.022)*gust*h*h;
+
+ vec3 p;
+
+ p.x=px+lx*scale+bendX;
+ p.y=py+aBlade.y*scale;
+ p.z=pz+lz*scale+bendZ;
+
+ vec4 viewPos=uView*vec4(p,1.);
+ vDist=length(viewPos.xyz);
+
+ gl_Position=uProj*viewPos;
+
+ vec3 base=vec3(.16,.29,.065);
+ vec3 tip=vec3(.43,.59,.17);
+
+ grassColor=mix(base,tip,h)*vec3(iVar.y,1.,iVar.z);
+ hOut=h;
+}`,
+`#version 300 es
+precision mediump float;
+
+in vec3 grassColor;
+in float hOut;
+in float vDist;
+
+uniform vec3 uFogColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSunColor;
+uniform vec3 uSunDir;
+
+out vec4 outColor;
+
+void main(){
+ vec3 base=grassColor*(.85+.15*hOut);
+
+ float lightIntensity=
+  .5+
+  .5*max(0.0,uSunDir.y);
+
+ vec3 c=
+  base*
+  (uAmbientColor+uSunColor*lightIntensity);
+
+ float fog=smoothstep(35.0,110.0,vDist);
+
+ c=mix(c,uFogColor,fog);
+
+ outColor=vec4(c,1.);
+}`
+);
+
+const treeProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=2) in vec3 aColor;
+
+layout(location=3) in vec4 iData;
+layout(location=4) in vec4 iParams;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uTime;
+
+out vec3 vColor;
+out vec3 vNormal;
+out float vDist;
+
+void main(){
+ float birth=iParams.x;
+ float dur=max(iParams.y,.001);
+ float rot=iParams.z;
+
+ float age=max(0.0,uTime-birth);
+ float growthProgress=clamp(age/dur,0.0,1.0);
+ float growth=smoothstep(0.0,1.0,growthProgress);
+
+ float maxS=iData.w;
+
+ float currentScale=
+  maxS*
+  mix(0.12,1.0,growth);
+
+ float co=cos(rot);
+ float si=sin(rot);
+
+ vec3 p=aPos;
+
+ if(p.y>0.8){
+  float h=p.y/5.0;
+
+  float w1=
+   sin(uTime*.85+iData.x*.05+iData.z*.03);
+
+  float w2=
+   cos(uTime*1.25-iData.x*.02+iData.z*.06);
+
+  p.x+=w1*.12*h;
+  p.z+=w2*.12*h;
+ }
+
+ p*=currentScale;
+
+ float rx=p.x*co-p.z*si;
+ float rz=p.x*si+p.z*co;
+
+ p.x=rx;
+ p.z=rz;
+
+ p.x+=iData.x;
+ p.y+=iData.y;
+ p.z+=iData.z;
+
+ vec3 n=aNormal;
+
+ float nx=n.x*co-n.z*si;
+ float nz=n.x*si+n.z*co;
+
+ vNormal=vec3(nx,n.y,nz);
+
+ vec4 viewPos=uView*vec4(p,1.);
+ vDist=length(viewPos.xyz);
+
+ gl_Position=uProj*viewPos;
+
+ vec3 saplingTint=
+  mix(
+   vec3(1.25,1.35,.85),
+   vec3(1.0),
+   smoothstep(0.0,.4,growthProgress)
+  );
+
+ vColor=aColor*saplingTint;
+}`,
+`#version 300 es
+precision mediump float;
+
+in vec3 vColor;
+in vec3 vNormal;
+in float vDist;
+
+uniform vec3 uFogColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSunColor;
+uniform vec3 uSunDir;
+
+out vec4 outColor;
+
+void main(){
+ vec3 norm=normalize(vNormal);
+
+ float diff=max(dot(norm,uSunDir),0.0);
+ float lightIntensity=.35+.65*diff;
+
+ vec3 c=
+  vColor*
+  (uAmbientColor+uSunColor*lightIntensity);
+
+ float fog=smoothstep(35.0,110.0,vDist);
+
+ c=mix(c,uFogColor,fog);
+
+ outColor=vec4(c,1.0);
+}`
+);
+
+function buildPineGeometry(){
+ const positions=[],normals=[],colors=[];
+
+ function addTri(p1,p2,p3,norm,col){
+  positions.push(...p1,...p2,...p3);
+  normals.push(...norm,...norm,...norm);
+  colors.push(...col,...col,...col);
+ }
+
+ function addQuad(p1,p2,p3,p4,col){
+  const ux=p2[0]-p1[0];
+  const uy=p2[1]-p1[1];
+  const uz=p2[2]-p1[2];
+
+  const vx=p3[0]-p1[0];
+  const vy=p3[1]-p1[1];
+  const vz=p3[2]-p1[2];
+
+  let nx=uy*vz-uz*vy;
+  let ny=uz*vx-ux*vz;
+  let nz=ux*vy-uy*vx;
+
+  const len=Math.hypot(nx,ny,nz)||1;
+  const norm=[nx/len,ny/len,nz/len];
+
+  addTri(p1,p2,p3,norm,col);
+  addTri(p1,p3,p4,norm,col);
+ }
+
+ function addCone(
+  baseY,
+  topY,
+  radiusBase,
+  radiusTop,
+  sides,
+  col
+ ){
+  for(let i=0;i<sides;i++){
+   const a1=(i/sides)*Math.PI*2;
+   const a2=((i+1)/sides)*Math.PI*2;
+
+   const x1b=Math.cos(a1)*radiusBase;
+   const z1b=Math.sin(a1)*radiusBase;
+
+   const x2b=Math.cos(a2)*radiusBase;
+   const z2b=Math.sin(a2)*radiusBase;
+
+   const x1t=Math.cos(a1)*radiusTop;
+   const z1t=Math.sin(a1)*radiusTop;
+
+   const x2t=Math.cos(a2)*radiusTop;
+   const z2t=Math.sin(a2)*radiusTop;
+
+   const p1=[x1b,baseY,z1b];
+   const p2=[x2b,baseY,z2b];
+   const p3=[x2t,topY,z2t];
+   const p4=[x1t,topY,z1t];
+
+   if(radiusTop===0){
+    const ux=p2[0]-p1[0];
+    const uy=p2[1]-p1[1];
+    const uz=p2[2]-p1[2];
+
+    const vx=p3[0]-p1[0];
+    const vy=p3[1]-p1[1];
+    const vz=p3[2]-p1[2];
+
+    let nx=uy*vz-uz*vy;
+    let ny=uz*vx-ux*vz;
+    let nz=ux*vy-uy*vx;
+
+    const len=Math.hypot(nx,ny,nz)||1;
+
+    addTri(
+     p1,p2,p3,
+     [nx/len,ny/len,nz/len],
+     col
+    );
+   }else{
+    addQuad(p1,p2,p3,p4,col);
+   }
+  }
+ }
+
+ addCone(0.0,1.8,.28,.18,6,[.26,.16,.09]);
+
+ addCone(1.1,3.6,1.55,0.0,7,[.12,.30,.09]);
+ addCone(2.2,4.7,1.25,0.0,7,[.16,.38,.12]);
+ addCone(3.4,5.8,.85,0.0,6,[.22,.46,.16]);
+
+ return {
+  positions:new Float32Array(positions),
+  normals:new Float32Array(normals),
+  colors:new Float32Array(colors),
+  vertexCount:positions.length/3
+ };
+}
+
+function buildOakGeometry(){
+ const positions=[],normals=[],colors=[];
+
+ function addTri(p1,p2,p3,norm,col){
+  positions.push(...p1,...p2,...p3);
+  normals.push(...norm,...norm,...norm);
+  colors.push(...col,...col,...col);
+ }
+
+ function addQuad(p1,p2,p3,p4,col){
+  const ux=p2[0]-p1[0];
+  const uy=p2[1]-p1[1];
+  const uz=p2[2]-p1[2];
+
+  const vx=p3[0]-p1[0];
+  const vy=p3[1]-p1[1];
+  const vz=p3[2]-p1[2];
+
+  let nx=uy*vz-uz*vy;
+  let ny=uz*vx-ux*vz;
+  let nz=ux*vy-uy*vx;
+
+  const len=Math.hypot(nx,ny,nz)||1;
+  const norm=[nx/len,ny/len,nz/len];
+
+  addTri(p1,p2,p3,norm,col);
+  addTri(p1,p3,p4,norm,col);
+ }
+
+ function addCylinder(
+  baseY,
+  topY,
+  rBase,
+  rTop,
+  sides,
+  col
+ ){
+  for(let i=0;i<sides;i++){
+   const a1=(i/sides)*Math.PI*2;
+   const a2=((i+1)/sides)*Math.PI*2;
+
+   const p1=[
+    Math.cos(a1)*rBase,
+    baseY,
+    Math.sin(a1)*rBase
+   ];
+
+   const p2=[
+    Math.cos(a2)*rBase,
+    baseY,
+    Math.sin(a2)*rBase
+   ];
+
+   const p3=[
+    Math.cos(a2)*rTop,
+    topY,
+    Math.sin(a2)*rTop
+   ];
+
+   const p4=[
+    Math.cos(a1)*rTop,
+    topY,
+    Math.sin(a1)*rTop
+   ];
+
+   addQuad(p1,p2,p3,p4,col);
+  }
+ }
+
+ function addFoliageClump(cx,cy,cz,radius,col){
+  const rings=4;
+  const segs=6;
+
+  for(let r=0;r<rings;r++){
+   const phi1=(r/rings)*Math.PI;
+   const phi2=((r+1)/rings)*Math.PI;
+
+   for(let s=0;s<segs;s++){
+    const theta1=(s/segs)*Math.PI*2;
+    const theta2=((s+1)/segs)*Math.PI*2;
+
+    const p1=[
+     cx+Math.sin(phi1)*Math.cos(theta1)*radius,
+     cy+Math.cos(phi1)*radius,
+     cz+Math.sin(phi1)*Math.sin(theta1)*radius
+    ];
+
+    const p2=[
+     cx+Math.sin(phi1)*Math.cos(theta2)*radius,
+     cy+Math.cos(phi1)*radius,
+     cz+Math.sin(phi1)*Math.sin(theta2)*radius
+    ];
+
+    const p3=[
+     cx+Math.sin(phi2)*Math.cos(theta2)*radius,
+     cy+Math.cos(phi2)*radius,
+     cz+Math.sin(phi2)*Math.sin(theta2)*radius
+    ];
+
+    const p4=[
+     cx+Math.sin(phi2)*Math.cos(theta1)*radius,
+     cy+Math.cos(phi2)*radius,
+     cz+Math.sin(phi2)*Math.sin(theta1)*radius
+    ];
+
+    const ux=p2[0]-p1[0];
+    const uy=p2[1]-p1[1];
+    const uz=p2[2]-p1[2];
+
+    const vx=p3[0]-p1[0];
+    const vy=p3[1]-p1[1];
+    const vz=p3[2]-p1[2];
+
+    let nx=uy*vz-uz*vy;
+    let ny=uz*vx-ux*vz;
+    let nz=ux*vy-uy*vx;
+
+    const len=Math.hypot(nx,ny,nz)||1;
+    const norm=[nx/len,ny/len,nz/len];
+
+    addTri(p1,p2,p3,norm,col);
+    addTri(p1,p3,p4,norm,col);
+   }
+  }
+ }
+
+ addCylinder(
+  0.0,
+  2.5,
+  .38,
+  .24,
+  7,
+  [.32,.20,.11]
+ );
+
+ addFoliageClump(
+  0.0,3.8,0.0,1.75,
+  [.22,.45,.12]
+ );
+
+ addFoliageClump(
+  .85,3.1,.5,1.30,
+  [.26,.52,.15]
+ );
+
+ addFoliageClump(
+  -.8,3.2,-.6,1.25,
+  [.18,.40,.10]
+ );
+
+ addFoliageClump(
+  .2,2.8,-.85,1.20,
+  [.24,.48,.14]
+ );
+
+ addFoliageClump(
+  -.4,2.9,.8,1.15,
+  [.20,.42,.11]
+ );
+
+ return {
+  positions:new Float32Array(positions),
+  normals:new Float32Array(normals),
+  colors:new Float32Array(colors),
+  vertexCount:positions.length/3
+ };
+}
+
+function createMeshBuffers(mesh){
+ const posBuf=gl.createBuffer();
+
+ gl.bindBuffer(gl.ARRAY_BUFFER,posBuf);
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  mesh.positions,
+  gl.STATIC_DRAW
+ );
+
+ const normBuf=gl.createBuffer();
+
+ gl.bindBuffer(gl.ARRAY_BUFFER,normBuf);
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  mesh.normals,
+  gl.STATIC_DRAW
+ );
+
+ const colBuf=gl.createBuffer();
+
+ gl.bindBuffer(gl.ARRAY_BUFFER,colBuf);
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  mesh.colors,
+  gl.STATIC_DRAW
+ );
+
+ return {
+  posBuf,
+  normBuf,
+  colBuf,
+  vertexCount:mesh.vertexCount
+ };
+}
+
+const pineMesh=createMeshBuffers(buildPineGeometry());
+const oakMesh=createMeshBuffers(buildOakGeometry());
+
+const stoneProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec4 iData;
+layout(location=2) in vec2 iExtra;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out float shade;
+out float vDist;
+
+void main(){
+ float c=cos(iExtra.x);
+ float s=sin(iExtra.x);
+
+ float x=aPos.x*c-aPos.z*s;
+ float z=aPos.x*s+aPos.z*c;
+
+ vec3 p;
+
+ p.x=iData.x+x*iData.w;
+ p.y=iData.y+aPos.y*iData.w;
+ p.z=iData.z+z*iData.w;
+
+ vec4 viewPos=uView*vec4(p,1.);
+
+ vDist=length(viewPos.xyz);
+ gl_Position=uProj*viewPos;
+
+ shade=iExtra.y;
+}`,
+`#version 300 es
+precision mediump float;
+
+in float shade;
+in float vDist;
+
+uniform vec3 uFogColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSunColor;
+
+out vec4 outColor;
+
+void main(){
+ vec3 base=vec3(shade);
+
+ vec3 c=
+  base*
+  (uAmbientColor+uSunColor*.7);
+
+ float fog=smoothstep(35.0,110.0,vDist);
+
+ outColor=vec4(
+  mix(c,uFogColor,fog),
+  1.
+ );
+}`
+);
+
+const pebbleVerts=[
+ -.16,.00,-.09, .16,.00,-.09, .13,.08,.06,
+ -.16,.00,-.09, .13,.08,.06,-.08,.00,.11,
+ .16,.00,-.09, .06,.02,.11, .13,.08,.06,
+ -.08,.00,.11, .13,.08,.06, .06,.02,.11,
+ -.16,.00,-.09, -.08,.00,.11, .06,.02,.11
+];
+
+const flowerProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec2 aPos;
+layout(location=1) in vec4 iData;
+layout(location=2) in vec3 iColor;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+
+out vec3 colorOut;
+out float vDist;
+
+void main(){
+ vec3 p=vec3(
+  iData.x+aPos.x*iData.w,
+  iData.y+.018,
+  iData.z+aPos.y*iData.w
+ );
+
+ vec4 viewPos=uView*vec4(p,1.);
+
+ vDist=length(viewPos.xyz);
+ gl_Position=uProj*viewPos;
+
+ colorOut=iColor;
+}`,
+`#version 300 es
+precision mediump float;
+
+in vec3 colorOut;
+in float vDist;
+
+uniform vec3 uFogColor;
+uniform vec3 uAmbientColor;
+uniform vec3 uSunColor;
+
+out vec4 outColor;
+
+void main(){
+ vec3 c=
+  colorOut*
+  (uAmbientColor+uSunColor*.85);
+
+ float fog=smoothstep(35.0,110.0,vDist);
+
+ outColor=vec4(
+  mix(c,uFogColor,fog),
+  1.
+ );
+}`
+);
+
+const rainProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec2 aLocal;
+layout(location=1) in vec4 iData;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uTime;
+uniform vec3 uPlayerPos;
+
+out float vAlpha;
+
+void main(){
+ const float boxW=46.0;
+ const float boxH=30.0;
+
+ float len=.55+.45*fract(iData.w*13.13);
+ float fallSpeed=11.0+iData.w*7.0;
+
+ float y=mod(
+  iData.y-uTime*fallSpeed,
+  boxH
+ );
+
+ float localY=aLocal.y;
+
+ float px=
+  mod(
+   iData.x-uPlayerPos.x+boxW*.5,
+   boxW
+  )-boxW*.5+uPlayerPos.x;
+
+ float pz=
+  mod(
+   iData.z-uPlayerPos.z+boxW*.5,
+   boxW
+  )-boxW*.5+uPlayerPos.z;
+
+ float py=
+  uPlayerPos.y+
+  (y-boxH*.5)+
+  7.0+
+  localY*len;
+
+ vAlpha=
+  clamp(
+   1.0-
+   abs(py-uPlayerPos.y)/(boxH*.55),
+   0.0,
+   1.0
+  );
+
+ gl_Position=
+  uProj*
+  uView*
+  vec4(px,py,pz,1.0);
+}`,
+`#version 300 es
+precision mediump float;
+
+in float vAlpha;
+
+uniform float uRain;
+uniform vec3 uAmbientColor;
+
+out vec4 outColor;
+
+void main(){
+ vec3 c=
+  mix(
+   vec3(.75,.80,.90),
+   uAmbientColor,
+   .4
+  );
+
+ outColor=vec4(
+  c,
+  vAlpha*uRain*.55
+ );
+}`
+);
+
+const splashProgram=makeProgram(
+`#version 300 es
+precision highp float;
+
+layout(location=0) in vec4 aLocal;
+layout(location=1) in vec4 iData;
+
+uniform mat4 uView;
+uniform mat4 uProj;
+uniform float uTime;
+uniform vec3 uPlayerPos;
+
+out float vAlpha;
+out float vShade;
+
+uint hashRaw(int xi,int zi,int seedi){
+ uint ux=uint(xi);
+ uint uz=uint(zi);
+ uint us=uint(seedi);
+
+ uint n=
+  ux*374761393u+
+  uz*668265263u+
+  us*1442695041u;
+
+ n=(n^(n>>13u))*1274126177u;
+ n^=(n>>16u);
+
+ return n;
+}
+
+float hash2f(float x,float z,float seed){
+ uint n=hashRaw(
+  int(x),
+  int(z),
+  int(seed)
+ );
+
+ return float(n)*(1.0/4294967296.0);
+}
+
+float smoothT(float t){
+ return t*t*(3.0-2.0*t);
+}
+
+float valueNoise(float x,float z){
+ float x0=floor(x);
+ float z0=floor(z);
+
+ float fx=x-x0;
+ float fz=z-z0;
+
+ float a=hash2f(x0,z0,17.0);
+ float b=hash2f(x0+1.0,z0,17.0);
+ float c=hash2f(x0,z0+1.0,17.0);
+ float d=hash2f(x0+1.0,z0+1.0,17.0);
+
+ float sx=smoothT(fx);
+ float sz=smoothT(fz);
+
+ return
+  (a+(b-a)*sx)+
+  (
+   (c+(d-c)*sx)-
+   (a+(b-a)*sx)
+  )*sz;
+}
+
+float terrainHeightGL(float x,float z){
+ float n1=valueNoise(x*.025,z*.025);
+ float n2=valueNoise(
+  x*.065+50.0,
+  z*.065-25.0
+ );
+ float n3=valueNoise(
+  x*.16-80.0,
+  z*.16+40.0
+ );
+
+ return
+  (n1-.5)*4.2+
+  (n2-.5)*1.5+
+  (n3-.5)*.35;
+}
+
+void main(){
+ const float boxW=46.0;
+ const float boxH=30.0;
+ const float splashWindow=1.1;
+ const float maxRise=.55;
+
+ float fallSpeed=11.0+iData.w*7.0;
+
+ float y=mod(
+  iData.y-uTime*fallSpeed,
+  boxH
+ );
+
+ float gate=step(y,splashWindow);
+
+ float t=
+  clamp(
+   1.0-y/splashWindow,
+   0.0,
+   1.0
+  );
+
+ float baseX=
+  mod(
+   iData.x-uPlayerPos.x+boxW*.5,
+   boxW
+  )-boxW*.5+
+  uPlayerPos.x;
+
+ float baseZ=
+  mod(
+   iData.z-uPlayerPos.z+boxW*.5,
+   boxW
+  )-boxW*.5+
+  uPlayerPos.z;
+
+ float groundY=
+  terrainHeightGL(
+   baseX,
+   baseZ
+  );
+
+ float radius=
+  mix(
+   .04,
+   aLocal.z,
+   t
+  );
+
+ float riseArc=4.0*t*(1.0-t);
+
+ float offsetY=
+  aLocal.w*
+  riseArc*
+  maxRise;
+
+ float px=baseX+aLocal.x*radius;
+ float pz=baseZ+aLocal.y*radius;
+ float py=groundY+.02+offsetY;
+
+ vAlpha=
+  gate*
+  (.20+.60*t);
+
+ vShade=
+  mix(
+   .72,
+   1.25,
+   aLocal.w*riseArc+t*.3
+  );
+
+ gl_Position=
+  uProj*
+  uView*
+  vec4(px,py,pz,1.0);
+}`,
+`#version 300 es
+precision mediump float;
+
+in float vAlpha;
+in float vShade;
+
+uniform float uRain;
+uniform vec3 uAmbientColor;
+
+out vec4 outColor;
+
+void main(){
+ vec3 c=
+  mix(
+   vec3(.85,.90,.97),
+   uAmbientColor,
+   .3
+  )*
+  vShade;
+
+ outColor=vec4(
+  c,
+  vAlpha*uRain*.65
+ );
+}`
+);
+
+function bufferAttribute(
+ location,
+ data,
+ size,
+ divisor,
+ ownedBuffers=null
+){
+ const b=gl.createBuffer();
+
+ gl.bindBuffer(gl.ARRAY_BUFFER,b);
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  data,
+  gl.STATIC_DRAW
+ );
+
+ gl.enableVertexAttribArray(location);
+ gl.vertexAttribPointer(
+  location,
+  size,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ if(divisor){
+  gl.vertexAttribDivisor(location,1);
+ }
+
+ if(ownedBuffers){
+  ownedBuffers.push(b);
+ }
+
+ return b;
+}
+
+const skyVAO=gl.createVertexArray();
+
+gl.bindVertexArray(skyVAO);
+
+bufferAttribute(
+ 0,
+ new Float32Array([
+  -1,-1,
+   1,-1,
+  -1, 1,
+   1, 1
+ ]),
+ 2,
+ false
+);
+
+gl.bindVertexArray(null);
+
+const RAIN_COUNT=3500;
+
+const rainInstanceData=
+ new Float32Array(RAIN_COUNT*4);
+
+for(let i=0;i<RAIN_COUNT;i++){
+ rainInstanceData[i*4+0]=
+  (Math.random()-.5)*46.0;
+
+ rainInstanceData[i*4+1]=
+  Math.random()*30.0;
+
+ rainInstanceData[i*4+2]=
+  (Math.random()-.5)*46.0;
+
+ rainInstanceData[i*4+3]=
+  Math.random();
+}
+
+const rainVAO=gl.createVertexArray();
+
+gl.bindVertexArray(rainVAO);
+
+bufferAttribute(
+ 0,
+ new Float32Array([
+  0,0,
+  0,-1
+ ]),
+ 2,
+ false
+);
+
+const rainInstanceBuffer=
+ bufferAttribute(
+  1,
+  rainInstanceData,
+  4,
+  true
+ );
+
+gl.bindVertexArray(null);
+
+const SPLASH_PETALS=7;
+const splashLocalArr=[];
+
+for(let i=0;i<SPLASH_PETALS;i++){
+ const segAngle=
+  (Math.PI*2)/SPLASH_PETALS;
+
+ const centerAngle=
+  i*segAngle;
+
+ const halfWidth=
+  segAngle*.17;
+
+ const a0=
+  centerAngle-halfWidth;
+
+ const a1=
+  centerAngle+halfWidth;
+
+ const baseR=.30;
+ const tipR=.95;
+
+ splashLocalArr.push(
+  Math.cos(a0),
+  Math.sin(a0),
+  baseR,
+  0.0,
+
+  Math.cos(centerAngle),
+  Math.sin(centerAngle),
+  tipR,
+  1.0,
+
+  Math.cos(a1),
+  Math.sin(a1),
+  baseR,
+  0.0
+ );
+}
+
+const splashLocalVerts=
+ new Float32Array(splashLocalArr);
+
+const splashVAO=gl.createVertexArray();
+
+gl.bindVertexArray(splashVAO);
+
+bufferAttribute(
+ 0,
+ splashLocalVerts,
+ 4,
+ false
+);
+
+gl.bindBuffer(
+ gl.ARRAY_BUFFER,
+ rainInstanceBuffer
+);
+
+gl.enableVertexAttribArray(1);
+
+gl.vertexAttribPointer(
+ 1,
+ 4,
+ gl.FLOAT,
+ false,
+ 0,
+ 0
+);
+
+gl.vertexAttribDivisor(1,1);
+
+gl.bindVertexArray(null);
+
+function hash2(x,z,seed){
+ let n=
+   (
+    x*374761393+
+    z*668265263+
+    seed*1442695041
+   )|0;
+
+ n=(n^(n>>>13))*1274126177|0;
+ n^=n>>>16;
+
+ return (n>>>0)/4294967296;
+}
+
+function smooth(t){
+ return t*t*(3-2*t);
+}
+
+function noise(x,z){
+ const x0=Math.floor(x);
+ const z0=Math.floor(z);
+
+ const fx=x-x0;
+ const fz=z-z0;
+
+ const a=hash2(x0,z0,17);
+ const b=hash2(x0+1,z0,17);
+ const c=hash2(x0,z0+1,17);
+ const d=hash2(x0+1,z0+1,17);
+
+ const sx=smooth(fx);
+ const sz=smooth(fz);
+
+ return (
+  (a+(b-a)*sx)+
+  (
+   (c+(d-c)*sx)-
+   (a+(b-a)*sx)
+  )*sz
+ );
+}
+
+function terrainHeight(x,z){
+ let n1=noise(
+  x*.025,
+  z*.025
+ );
+
+ let n2=noise(
+  x*.065+50,
+  z*.065-25
+ );
+
+ let n3=noise(
+  x*.16-80,
+  z*.16+40
+ );
+
+ return (
+  (n1-.5)*4.2+
+  (n2-.5)*1.5+
+  (n3-.5)*.35
+ );
+}
+
+const CHUNK=32;
+
+const LOAD_RADIUS=3;
+
+const FOREST_CHUNK_CHANCE=.0015;
+
+function isForestChunk(cx,cz){
+ if(cx===0&&cz===0)return false;
+
+ const r=
+  hash2(
+   cx*17+913,
+   cz*31-427,
+   701
+  );
+
+ return r<FOREST_CHUNK_CHANCE;
+}
+
+function biomeNameAt(x,z){
+ const cx=Math.floor(x/CHUNK);
+ const cz=Math.floor(z/CHUNK);
+
+ return isForestChunk(cx,cz)
+  ? "LUSH FOREST"
+  : "OPEN MEADOW PLAINS";
+}
+
+const active=new Map();
+
+let generatedGrass=0;
+let generatedPebbles=0;
+let generatedFlowers=0;
+let generatedTrees=0;
+
+function chunkKey(cx,cz){
+ return cx+","+cz;
+}
+
+function setupTreeVAO(
+ meshData,
+ treeData,
+ treeParams,
+ ownedBuffers
+){
+ const vao=gl.createVertexArray();
+
+ gl.bindVertexArray(vao);
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  meshData.posBuf
+ );
+
+ gl.enableVertexAttribArray(0);
+
+ gl.vertexAttribPointer(
+  0,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  meshData.normBuf
+ );
+
+ gl.enableVertexAttribArray(1);
+
+ gl.vertexAttribPointer(
+  1,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  meshData.colBuf
+ );
+
+ gl.enableVertexAttribArray(2);
+
+ gl.vertexAttribPointer(
+  2,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ bufferAttribute(
+  3,
+  new Float32Array(treeData),
+  4,
+  true,
+  ownedBuffers
+ );
+
+ bufferAttribute(
+  4,
+  new Float32Array(treeParams),
+  4,
+  true,
+  ownedBuffers
+ );
+
+ gl.bindVertexArray(null);
+
+ return vao;
+}
+
+function createChunk(cx,cz){
+ const key=chunkKey(cx,cz);
+
+ if(active.has(key)){
+  return active.get(key);
+ }
+
+ const baseX=cx*CHUNK;
+ const baseZ=cz*CHUNK;
+
+ const ownedBuffers=[];
+
+
+ const terrainVAO=gl.createVertexArray();
+
+ gl.bindVertexArray(terrainVAO);
+
+ const pos=[];
+ const shade=[];
+ const ind=[];
+
+ for(let z=0;z<=12;z++){
+  for(let x=0;x<=12;x++){
+   const px=
+    baseX+
+    (x/12)*CHUNK;
+
+   const pz=
+    baseZ+
+    (z/12)*CHUNK;
+
+   const y=
+    terrainHeight(px,pz);
+
+   pos.push(
+    px,
+    y,
+    pz
+   );
+
+   const s=
+    .92+
+    noise(px*.11,pz*.11)*.13;
+
+   shade.push(s);
+  }
+ }
+
+ for(let z=0;z<12;z++){
+  for(let x=0;x<12;x++){
+   const a=z*13+x;
+   const b=a+1;
+   const c=a+13;
+   const d=c+1;
+
+   ind.push(
+    a,b,d,
+    a,d,c
+   );
+  }
+ }
+
+ const posBuf=gl.createBuffer();
+ ownedBuffers.push(posBuf);
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  posBuf
+ );
+
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  new Float32Array(pos),
+  gl.STATIC_DRAW
+ );
+
+ gl.enableVertexAttribArray(0);
+
+ gl.vertexAttribPointer(
+  0,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ bufferAttribute(
+  1,
+  new Float32Array(shade),
+  1,
+  false,
+  ownedBuffers
+ );
+
+ const ib=gl.createBuffer();
+ ownedBuffers.push(ib);
+
+ gl.bindBuffer(
+  gl.ELEMENT_ARRAY_BUFFER,
+  ib
+ );
+
+ gl.bufferData(
+  gl.ELEMENT_ARRAY_BUFFER,
+  new Uint16Array(ind),
+  gl.STATIC_DRAW
+ );
+
+
+ const grassData=[];
+ const grassVar=[];
+
+ const grassSpacing=.95;
+
+ for(
+  let z=1;
+  z<CHUNK;
+  z+=grassSpacing
+ ){
+  for(
+   let x=1;
+   x<CHUNK;
+   x+=grassSpacing
+  ){
+   const wx=baseX+x;
+   const wz=baseZ+z;
+
+   const patchA=
+    noise(wx*.038,wz*.038);
+
+   const patchB=
+    noise(
+     wx*.083+30,
+     wz*.083-50
+    );
+
+   const patchC=
+    noise(
+     wx*.17-90,
+     wz*.17+20
+    );
+
+   const strength=
+    patchA*.60+
+    patchB*.28+
+    patchC*.12;
+
+   if(strength<.54)continue;
+
+   const localChance=
+    hash2(
+     Math.floor(wx*1.7),
+     Math.floor(wz*1.7),
+     91
+    );
+
+   if(
+    localChance>
+    .42+(strength-.54)*.8
+   )continue;
+
+   const jx=
+    (
+     hash2(
+      Math.floor(wx*7),
+      Math.floor(wz*7),
+      41
+     )-.5
+    )*.68;
+
+   const jz=
+    (
+     hash2(
+      Math.floor(wx*7),
+      Math.floor(wz*7),
+      42
+     )-.5
+    )*.68;
+
+   const px=wx+jx;
+   const pz=wz+jz;
+   const py=terrainHeight(px,pz);
+
+   const scaleSeed=
+    hash2(
+     Math.floor(wx*9),
+     Math.floor(wz*9),
+     53
+    );
+
+   let scale;
+
+   if(scaleSeed<.25){
+    scale=.38+scaleSeed*.42;
+   }else if(scaleSeed<.86){
+    scale=.55+scaleSeed*.35;
+   }else{
+    scale=.85+scaleSeed*.35;
+   }
+
+   const tintSeed=
+    hash2(
+     Math.floor(wx*13),
+     Math.floor(wz*13),
+     63
+    );
+
+   grassData.push(
+    px,
+    py,
+    pz,
+    scale
+   );
+
+   grassVar.push(
+    hash2(
+     Math.floor(wx*5),
+     Math.floor(wz*5),
+     73
+    )*
+    Math.PI*2,
+
+    .78+tintSeed*.25,
+
+    .74+
+    hash2(
+     Math.floor(wx*11),
+     Math.floor(wz*11),
+     74
+    )*.30
+   );
+
+   generatedGrass++;
+  }
+ }
+
+ const grassVAO=
+  gl.createVertexArray();
+
+ gl.bindVertexArray(grassVAO);
+
+ const tb=gl.createBuffer();
+ ownedBuffers.push(tb);
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  tb
+ );
+
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  new Float32Array(grassVerts),
+  gl.STATIC_DRAW
+ );
+
+ gl.enableVertexAttribArray(0);
+
+ gl.vertexAttribPointer(
+  0,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ bufferAttribute(
+  1,
+  new Float32Array(grassData),
+  4,
+  true,
+  ownedBuffers
+ );
+
+ bufferAttribute(
+  2,
+  new Float32Array(grassVar),
+  3,
+  true,
+  ownedBuffers
+ );
+
+
+ const pebData=[];
+ const pebShade=[];
+
+ const PEBBLES_PER_CHUNK=70;
+
+ for(let i=0;i<PEBBLES_PER_CHUNK;i++){
+  const rx=
+   hash2(
+    cx*113+i,
+    cz*71+i*5,
+    101
+   );
+
+  const rz=
+   hash2(
+    cx*97+i*3,
+    cz*89+i,
+    102
+   );
+
+  const wx=
+   baseX+
+   rx*CHUNK;
+
+  const wz=
+   baseZ+
+   rz*CHUNK;
+
+  const wy=
+   terrainHeight(wx,wz);
+
+  const size=
+   .10+
+   hash2(
+    cx*17+i,
+    cz*19+i,
+    103
+   )*.16;
+
+  pebData.push(
+   wx,
+   wy,
+   wz,
+   size
+  );
+
+  const rot=
+   hash2(
+    cx*23+i,
+    cz*29+i,
+    104
+   )*
+   Math.PI*2;
+
+  const sh=
+   .54+
+   hash2(
+    cx*31+i,
+    cz*37+i,
+    105
+   )*.24;
+
+  pebShade.push(rot,sh);
+
+  generatedPebbles++;
+ }
+
+ const stoneVAO=
+  gl.createVertexArray();
+
+ gl.bindVertexArray(stoneVAO);
+
+ const pv=gl.createBuffer();
+ ownedBuffers.push(pv);
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  pv
+ );
+
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  new Float32Array(pebbleVerts),
+  gl.STATIC_DRAW
+ );
+
+ gl.enableVertexAttribArray(0);
+
+ gl.vertexAttribPointer(
+  0,
+  3,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ bufferAttribute(
+  1,
+  new Float32Array(pebData),
+  4,
+  true,
+  ownedBuffers
+ );
+
+ bufferAttribute(
+  2,
+  new Float32Array(pebShade),
+  2,
+  true,
+  ownedBuffers
+ );
+
+
+ const flowerData=[];
+ const flowerColor=[];
+
+ for(let i=0;i<11;i++){
+  const rx=
+   hash2(
+    cx*73+i,
+    cz*41+i,
+    201
+   );
+
+  const rz=
+   hash2(
+    cx*53+i*2,
+    cz*67+i,
+    202
+   );
+
+  const wx=
+   baseX+
+   rx*CHUNK;
+
+  const wz=
+   baseZ+
+   rz*CHUNK;
+
+  const wy=
+   terrainHeight(wx,wz);
+
+  const patch=
+   noise(wx*.05,wz*.05);
+
+  if(patch<.58)continue;
+
+  flowerData.push(
+   wx,
+   wy,
+   wz,
+   .20+
+   hash2(
+    cx*11+i,
+    cz*13+i,
+    203
+   )*.25
+  );
+
+  const flowerType=
+   hash2(
+    cx*17+i,
+    cz*19+i,
+    204
+   );
+
+  if(flowerType<.5){
+   flowerColor.push(
+    .95,.76,.26
+   );
+  }else{
+   flowerColor.push(
+    .86,.83,.60
+   );
+  }
+
+  generatedFlowers++;
+ }
+
+ const flowerVAO=
+  gl.createVertexArray();
+
+ gl.bindVertexArray(flowerVAO);
+
+ const fv=gl.createBuffer();
+ ownedBuffers.push(fv);
+
+ gl.bindBuffer(
+  gl.ARRAY_BUFFER,
+  fv
+ );
+
+ gl.bufferData(
+  gl.ARRAY_BUFFER,
+  new Float32Array([
+   -.07,-.04,
+    .07,-.04,
+    .05,.07,
+
+   -.07,-.04,
+    .05,.07,
+   -.05,.08
+  ]),
+  gl.STATIC_DRAW
+ );
+
+ gl.enableVertexAttribArray(0);
+
+ gl.vertexAttribPointer(
+  0,
+  2,
+  gl.FLOAT,
+  false,
+  0,
+  0
+ );
+
+ bufferAttribute(
+  1,
+  new Float32Array(flowerData),
+  4,
+  true,
+  ownedBuffers
+ );
+
+ bufferAttribute(
+  2,
+  new Float32Array(flowerColor),
+  3,
+  true,
+  ownedBuffers
+ );
+
+
+ const pineData=[];
+ const pineParams=[];
+
+ const oakData=[];
+ const oakParams=[];
+
+ const treeCollisionData=[];
+
+ const forestChunk=
+  isForestChunk(cx,cz);
+
+ let candidateCount=0;
+
+ if(forestChunk){
+  candidateCount=12;
+ }else{
+  candidateCount=
+   hash2(cx*13,cz*29,402)<.08
+    ? 1
+    : 0;
+ }
+
+ for(let i=0;i<candidateCount;i++){
+  const rx=
+   hash2(
+    cx*131+i*7,
+    cz*47+i*11,
+    301
+   );
+
+  const rz=
+   hash2(
+    cx*59+i*13,
+    cz*83+i*3,
+    302
+   );
+
+  const wx=
+   baseX+
+   rx*CHUNK;
+
+  const wz=
+   baseZ+
+   rz*CHUNK;
+
+  const wy=
+   terrainHeight(wx,wz);
+
+  const localVal=
+   noise(
+    wx*.04,
+    wz*.04
+   );
+
+  if(forestChunk){
+   if(localVal<.38)continue;
+  }else{
+   if(localVal<.86)continue;
+  }
+
+  let tooClose=false;
+
+  for(let p=0;p<treeCollisionData.length;p+=7){
+   const ox=treeCollisionData[p+0];
+   const oz=treeCollisionData[p+1];
+
+   const dx=wx-ox;
+   const dz=wz-oz;
+
+   if(dx*dx+dz*dz<4.8*4.8){
+    tooClose=true;
+    break;
+   }
+  }
+
+  if(tooClose)continue;
+
+  const maxScale=
+   .82+
+   hash2(
+    cx*19+i,
+    cz*23+i,
+    303
+   )*.52;
+
+  const birthTime=
+   hash2(
+    cx*37+i,
+    cz*41+i,
+    304
+   )*
+   140.0;
+
+  const growthDuration=
+   18.0+
+   hash2(
+    cx*43+i,
+    cz*53+i,
+    307
+   )*
+   20.0;
+
+  const rotAngle=
+   hash2(
+    cx*61+i,
+    cz*67+i,
+    308
+   )*
+   Math.PI*2;
+
+  const seed=
+   hash2(
+    cx*71+i,
+    cz*73+i,
+    309
+   );
+
+  const treeType=
+   hash2(
+    cx*89+i,
+    cz*97+i,
+    310
+   );
+
+  if(treeType>.45){
+   oakData.push(
+    wx,
+    wy,
+    wz,
+    maxScale
+   );
+
+   oakParams.push(
+    birthTime,
+    growthDuration,
+    rotAngle,
+    seed
+   );
+
+   treeCollisionData.push(
+    wx,
+    wz,
+    .42,
+    maxScale,
+    birthTime,
+    growthDuration,
+    1
+   );
+  }else{
+   pineData.push(
+    wx,
+    wy,
+    wz,
+    maxScale
+   );
+
+   pineParams.push(
+    birthTime,
+    growthDuration,
+    rotAngle,
+    seed
+   );
+
+   treeCollisionData.push(
+    wx,
+    wz,
+    .31,
+    maxScale,
+    birthTime,
+    growthDuration,
+    0
+   );
+  }
+
+  generatedTrees++;
+ }
+
+ const pineVAO=
+  pineData.length
+   ? setupTreeVAO(
+      pineMesh,
+      pineData,
+      pineParams,
+      ownedBuffers
+     )
+   : null;
+
+ const oakVAO=
+  oakData.length
+   ? setupTreeVAO(
+      oakMesh,
+      oakData,
+      oakParams,
+      ownedBuffers
+     )
+   : null;
+
+ gl.bindVertexArray(null);
+
+ const chunk={
+  cx,
+  cz,
+
+  terrainVAO,
+  terrainIndexCount:ind.length,
+
+  grassVAO,
+  grassCount:grassData.length/4,
+
+  stoneVAO,
+  stoneCount:pebData.length/4,
+
+  flowerVAO,
+  flowerCount:flowerData.length/4,
+
+  pineVAO,
+  pineCount:pineData.length/4,
+
+  oakVAO,
+  oakCount:oakData.length/4,
+
+  isForestChunk:forestChunk,
+
+  treeCollisionData,
+
+  ownedBuffers
+ };
+
+ active.set(key,chunk);
+
+ return chunk;
+}
+
+function deleteChunk(chunk){
+ if(!chunk)return;
+
+ if(chunk.terrainVAO){
+  gl.deleteVertexArray(chunk.terrainVAO);
+ }
+
+ if(chunk.grassVAO){
+  gl.deleteVertexArray(chunk.grassVAO);
+ }
+
+ if(chunk.stoneVAO){
+  gl.deleteVertexArray(chunk.stoneVAO);
+ }
+
+ if(chunk.flowerVAO){
+  gl.deleteVertexArray(chunk.flowerVAO);
+ }
+
+ if(chunk.pineVAO){
+  gl.deleteVertexArray(chunk.pineVAO);
+ }
+
+ if(chunk.oakVAO){
+  gl.deleteVertexArray(chunk.oakVAO);
+ }
+
+ if(chunk.ownedBuffers){
+  for(const b of chunk.ownedBuffers){
+   gl.deleteBuffer(b);
+  }
+ }
+
+ chunk.ownedBuffers=null;
+}
+
+function updateChunks(){
+ const pcx=Math.floor(playerX/CHUNK);
+ const pcz=Math.floor(playerZ/CHUNK);
+
+ const wanted=[];
+
+ for(
+  let dz=-LOAD_RADIUS;
+  dz<=LOAD_RADIUS;
+  dz++
+ ){
+  for(
+   let dx=-LOAD_RADIUS;
+   dx<=LOAD_RADIUS;
+   dx++
+  ){
+   wanted.push({
+    cx:pcx+dx,
+    cz:pcz+dz,
+    d:dx*dx+dz*dz
+   });
+  }
+ }
+
+ wanted.sort(
+  (a,b)=>a.d-b.d
+ );
+
+ let made=0;
+
+ for(let i=0;i<wanted.length;i++){
+  const w=wanted[i];
+
+  if(
+   !active.has(
+    chunkKey(w.cx,w.cz)
+   )
+  ){
+   createChunk(
+    w.cx,
+    w.cz
+   );
+
+   made++;
+
+   if(made>=2)break;
+  }
+ }
+
+ for(const [key,ch] of active){
+  if(
+   Math.abs(ch.cx-pcx)>LOAD_RADIUS||
+   Math.abs(ch.cz-pcz)>LOAD_RADIUS
+  ){
+   active.delete(key);
+   deleteChunk(ch);
+  }
+ }
+}
+
+let playerX=0;
+let playerZ=8;
+let playerY=4.0;
+
+let velocityY=0;
+let grounded=false;
+
+let yaw=0;
+let pitch=-.06;
+
+const keys=Object.create(null);
+
+addEventListener("keydown",e=>{
+ const k=e.key.toLowerCase();
+
+ keys[k]=true;
+
+ if(k===" "){
+  e.preventDefault();
+  jump();
+ }
+});
+
+addEventListener("keyup",e=>{
+ keys[e.key.toLowerCase()]=false;
+});
+
+function jump(){
+ if(grounded){
+  velocityY=7.2;
+  grounded=false;
+ }
+}
+
+function resolveTreeCollision(){
+ const playerRadius=.30;
+
+ const searchRadius=5.0;
+
+ for(const ch of active.values()){
+  const trees=ch.treeCollisionData;
+
+  if(!trees||!trees.length)continue;
+
+  for(let i=0;i<trees.length;i+=7){
+   const tx=trees[i+0];
+   const tz=trees[i+1];
+
+   let dx=playerX-tx;
+   let dz=playerZ-tz;
+
+   if(
+    Math.abs(dx)>searchRadius||
+    Math.abs(dz)>searchRadius
+   ){
+    continue;
+   }
+
+   const baseRadius=trees[i+2];
+   const maxScale=trees[i+3];
+   const birth=trees[i+4];
+   const duration=Math.max(
+    trees[i+5],
+    .001
+   );
+
+   const age=
+    Math.max(
+     0.0,
+     elapsed-birth
+    );
+
+   const growthProgress=
+    Math.min(
+     1.0,
+     age/duration
+    );
+
+   const growth=(
+    growthProgress*
+    growthProgress*
+    (3.0-2.0*growthProgress)
+   );
+
+   const currentScale=
+    maxScale*
+    (
+     .12+
+     .88*growth
+    );
+
+   const treeRadius=
+    baseRadius*
+    currentScale;
+
+   const minDistance=
+    playerRadius+
+    treeRadius;
+
+   const d2=dx*dx+dz*dz;
+
+   if(d2>=minDistance*minDistance){
+    continue;
+   }
+
+   let dist=Math.sqrt(d2);
+
+   
+   if(dist<0.0001){
+    dx=.001;
+    dz=0;
+    dist=.001;
+   }
+
+   const push=
+    (minDistance-dist)/dist;
+
+   playerX+=dx*push;
+   playerZ+=dz*push;
+  }
+ }
+
+ const floor=
+  terrainHeight(
+   playerX,
+   playerZ
+  )+
+  1.72;
+
+ if(playerY<floor){
+  playerY=floor;
+
+  if(velocityY<0){
+   velocityY=0;
+  }
+
+  grounded=true;
+ }
+}
+
+function updatePlayer(dt){
+ let f=0;
+ let s=0;
+
+ if(keys.w||keys.arrowup)f++;
+ if(keys.s||keys.arrowdown)f--;
+ if(keys.a||keys.arrowleft)s++;
+ if(keys.d||keys.arrowright)s--;
+
+ const len=Math.hypot(f,s);
+
+ if(len){
+  f/=len;
+  s/=len;
+
+  const speed=
+   keys.shift
+    ? 8.6
+    : 4.8;
+
+  const sy=Math.sin(yaw);
+  const cy=Math.cos(yaw);
+
+  playerX+=
+   (
+    s*cy+
+    f*sy
+   )*
+   speed*
+   dt;
+
+  playerZ+=
+   (
+    -s*sy+
+    f*cy
+   )*
+   speed*
+   dt;
+
+  resolveTreeCollision();
+ }
+
+ const floor=
+  terrainHeight(
+   playerX,
+   playerZ
+  )+
+  1.72;
+
+ velocityY-=19*dt;
+
+ playerY+=velocityY*dt;
+
+ if(playerY<=floor){
+  playerY=floor;
+  velocityY=0;
+  grounded=true;
+ }else{
+  grounded=false;
+ }
+
+ resolveTreeCollision();
+}
+
+let dragging=false;
+let oldX=0;
+let oldY=0;
+
+canvas.addEventListener(
+ "pointerdown",
+ e=>{
+  dragging=true;
+
+  oldX=e.clientX;
+  oldY=e.clientY;
+
+  canvas.setPointerCapture?.(
+   e.pointerId
+  );
+ }
+);
+
+canvas.addEventListener(
+ "pointermove",
+ e=>{
+  if(!dragging)return;
+
+  const dx=e.clientX-oldX;
+  const dy=e.clientY-oldY;
+
+  oldX=e.clientX;
+  oldY=e.clientY;
+
+  yaw-=dx*.0030;
+
+  pitch-=dy*.0021;
+
+  pitch=
+   Math.max(
+    -1.18,
+    Math.min(
+     1.18,
+     pitch
+    )
+   );
+ }
+);
+
+canvas.addEventListener(
+ "pointerup",
+ e=>{
+  dragging=false;
+
+  canvas.releasePointerCapture?.(
+   e.pointerId
+  );
+ }
+);
+
+canvas.addEventListener(
+ "pointercancel",
+ ()=>{
+  dragging=false;
+ }
+);
+
+document
+ .getElementById("jump")
+ .addEventListener(
+  "pointerdown",
+  e=>{
+   e.preventDefault();
+   jump();
+  }
+ );
+
+function perspective(
+ fov,
+ aspect,
+ near,
+ far
+){
+ const f=1/Math.tan(fov*.5);
+ const nf=1/(near-far);
+
+ return new Float32Array([
+  f/aspect,0,0,0,
+  0,f,0,0,
+  0,0,(far+near)*nf,-1,
+  0,0,(2*far*near)*nf,0
+ ]);
+}
+
+function norm(x,y,z){
+ const d=Math.hypot(x,y,z)||1;
+
+ return [
+  x/d,
+  y/d,
+  z/d
+ ];
+}
+
+function cross(a,b){
+ return [
+  a[1]*b[2]-a[2]*b[1],
+  a[2]*b[0]-a[0]*b[2],
+  a[0]*b[1]-a[1]*b[0]
+ ];
+}
+
+function viewMatrix(
+ ex,ey,ez,
+ cx,cy,cz
+){
+ const z=norm(
+  ex-cx,
+  ey-cy,
+  ez-cz
+ );
+
+ let x=
+  cross(
+   [0,1,0],
+   z
+  );
+
+ const d=
+  Math.hypot(
+   x[0],
+   x[1],
+   x[2]
+  );
+
+ if(d<1e-6){
+  x=[1,0,0];
+ }else{
+  x=[
+   x[0]/d,
+   x[1]/d,
+   x[2]/d
+  ];
+ }
+
+ const y=cross(z,x);
+
+ return new Float32Array([
+  x[0],y[0],z[0],0,
+  x[1],y[1],z[1],0,
+  x[2],y[2],z[2],0,
+
+  -(x[0]*ex+x[1]*ey+x[2]*ez),
+  -(y[0]*ex+y[1]*ey+y[2]*ez),
+  -(z[0]*ex+z[1]*ey+z[2]*ez),
+
+  1
+ ]);
+}
+
+let projection;
+
+function resize(){
+ const dpr=
+  Math.min(
+   window.devicePixelRatio||1,
+   1.10
+  );
+
+ canvas.width=
+  Math.max(
+   1,
+   Math.floor(innerWidth*dpr)
+  );
+
+ canvas.height=
+  Math.max(
+   1,
+   Math.floor(innerHeight*dpr)
+  );
+
+ canvas.style.width=
+  innerWidth+"px";
+
+ canvas.style.height=
+  innerHeight+"px";
+
+ gl.viewport(
+  0,
+  0,
+  canvas.width,
+  canvas.height
+ );
+
+ projection=
+  perspective(
+   70*Math.PI/180,
+   canvas.width/canvas.height,
+   .05,
+   600
+  );
+}
+
+addEventListener(
+ "resize",
+ resize
+);
+
+resize();
+
+const skyU={
+ view:gl.getUniformLocation(
+  skyProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  skyProgram,
+  "uProj"
+ ),
+ time:gl.getUniformLocation(
+  skyProgram,
+  "uTime"
+ ),
+ rain:gl.getUniformLocation(
+  skyProgram,
+  "uRain"
+ ),
+ skyTop:gl.getUniformLocation(
+  skyProgram,
+  "uSkyTop"
+ ),
+ skyHorizon:gl.getUniformLocation(
+  skyProgram,
+  "uSkyHorizon"
+ ),
+ sunDir:gl.getUniformLocation(
+  skyProgram,
+  "uSunDir"
+ ),
+ sunColor:gl.getUniformLocation(
+  skyProgram,
+  "uSunColor"
+ ),
+ moonDir:gl.getUniformLocation(
+  skyProgram,
+  "uMoonDir"
+ ),
+ moonColor:gl.getUniformLocation(
+  skyProgram,
+  "uMoonColor"
+ ),
+ cloudColor:gl.getUniformLocation(
+  skyProgram,
+  "uCloudColor"
+ ),
+ nightFactor:gl.getUniformLocation(
+  skyProgram,
+  "uNightFactor"
+ )
+};
+
+const terrainU={
+ view:gl.getUniformLocation(
+  terrainProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  terrainProgram,
+  "uProj"
+ ),
+ fog:gl.getUniformLocation(
+  terrainProgram,
+  "uFogColor"
+ ),
+ ambient:gl.getUniformLocation(
+  terrainProgram,
+  "uAmbientColor"
+ ),
+ sunColor:gl.getUniformLocation(
+  terrainProgram,
+  "uSunColor"
+ ),
+ sunDir:gl.getUniformLocation(
+  terrainProgram,
+  "uSunDir"
+ )
+};
+
+const grassU={
+ view:gl.getUniformLocation(
+  grassProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  grassProgram,
+  "uProj"
+ ),
+ time:gl.getUniformLocation(
+  grassProgram,
+  "uTime"
+ ),
+ fog:gl.getUniformLocation(
+  grassProgram,
+  "uFogColor"
+ ),
+ ambient:gl.getUniformLocation(
+  grassProgram,
+  "uAmbientColor"
+ ),
+ sunColor:gl.getUniformLocation(
+  grassProgram,
+  "uSunColor"
+ ),
+ sunDir:gl.getUniformLocation(
+  grassProgram,
+  "uSunDir"
+ )
+};
+
+const treeU={
+ view:gl.getUniformLocation(
+  treeProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  treeProgram,
+  "uProj"
+ ),
+ time:gl.getUniformLocation(
+  treeProgram,
+  "uTime"
+ ),
+ fog:gl.getUniformLocation(
+  treeProgram,
+  "uFogColor"
+ ),
+ ambient:gl.getUniformLocation(
+  treeProgram,
+  "uAmbientColor"
+ ),
+ sunColor:gl.getUniformLocation(
+  treeProgram,
+  "uSunColor"
+ ),
+ sunDir:gl.getUniformLocation(
+  treeProgram,
+  "uSunDir"
+ )
+};
+
+const stoneU={
+ view:gl.getUniformLocation(
+  stoneProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  stoneProgram,
+  "uProj"
+ ),
+ fog:gl.getUniformLocation(
+  stoneProgram,
+  "uFogColor"
+ ),
+ ambient:gl.getUniformLocation(
+  stoneProgram,
+  "uAmbientColor"
+ ),
+ sunColor:gl.getUniformLocation(
+  stoneProgram,
+  "uSunColor"
+ )
+};
+
+const flowerU={
+ view:gl.getUniformLocation(
+  flowerProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  flowerProgram,
+  "uProj"
+ ),
+ fog:gl.getUniformLocation(
+  flowerProgram,
+  "uFogColor"
+ ),
+ ambient:gl.getUniformLocation(
+  flowerProgram,
+  "uAmbientColor"
+ ),
+ sunColor:gl.getUniformLocation(
+  flowerProgram,
+  "uSunColor"
+ )
+};
+
+const rainU={
+ view:gl.getUniformLocation(
+  rainProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  rainProgram,
+  "uProj"
+ ),
+ time:gl.getUniformLocation(
+  rainProgram,
+  "uTime"
+ ),
+ player:gl.getUniformLocation(
+  rainProgram,
+  "uPlayerPos"
+ ),
+ rain:gl.getUniformLocation(
+  rainProgram,
+  "uRain"
+ ),
+ ambient:gl.getUniformLocation(
+  rainProgram,
+  "uAmbientColor"
+ )
+};
+
+const splashU={
+ view:gl.getUniformLocation(
+  splashProgram,
+  "uView"
+ ),
+ proj:gl.getUniformLocation(
+  splashProgram,
+  "uProj"
+ ),
+ time:gl.getUniformLocation(
+  splashProgram,
+  "uTime"
+ ),
+ player:gl.getUniformLocation(
+  splashProgram,
+  "uPlayerPos"
+ ),
+ rain:gl.getUniformLocation(
+  splashProgram,
+  "uRain"
+ ),
+ ambient:gl.getUniformLocation(
+  splashProgram,
+  "uAmbientColor"
+ )
+};
+
+let audioCtx=null;
+let isPlaying=false;
+let masterGain=null;
+let timers=[];
+
+let rainTarget=0;
+let rainAmount=0;
+
+let rainGainNode=null;
+let thunderTimer=null;
+
+const scaleFrequencies=[
+  65.41,
+  98.00,
+  130.81,
+  146.83,
+  164.81,
+  196.00,
+  220.00,
+  261.63,
+  293.66,
+  329.63,
+  392.00,
+  440.00,
+  523.25,
+  587.33,
+  659.25,
+  783.99,
+  880.00
+];
+
+function startEnvironmentAudio(){
+ if(isPlaying)return;
+
+ audioCtx=
+  new (
+   window.AudioContext||
+   window.webkitAudioContext
+  )();
+
+ masterGain=
+  audioCtx.createGain();
+
+ masterGain.gain.setValueAtTime(
+  .01,
+  audioCtx.currentTime
+ );
+
+ masterGain.gain.exponentialRampToValueAtTime(
+  .35,
+  audioCtx.currentTime+3
+ );
+
+ masterGain.connect(
+  audioCtx.destination
+ );
+
+ const bufferSize=
+  audioCtx.sampleRate*2;
+
+ const noiseBuffer=
+  audioCtx.createBuffer(
+   1,
+   bufferSize,
+   audioCtx.sampleRate
+  );
+
+ const output=
+  noiseBuffer.getChannelData(0);
+
+ for(
+  let i=0;
+  i<bufferSize;
+  i++
+ ){
+  output[i]=
+   Math.random()>.998
+    ? (Math.random()*2-1)*.5
+    : (Math.random()*2-1)*.02;
+ }
+
+ const whiteNoise=
+  audioCtx.createBufferSource();
+
+ whiteNoise.buffer=
+  noiseBuffer;
+
+ whiteNoise.loop=true;
+
+ const noiseFilter=
+  audioCtx.createBiquadFilter();
+
+ noiseFilter.type="lowpass";
+
+ noiseFilter.frequency.setValueAtTime(
+  800,
+  audioCtx.currentTime
+ );
+
+ const noiseGain=
+  audioCtx.createGain();
+
+ noiseGain.gain.setValueAtTime(
+  .08,
+  audioCtx.currentTime
+ );
+
+ whiteNoise.connect(noiseFilter);
+ noiseFilter.connect(noiseGain);
+ noiseGain.connect(masterGain);
+
+ whiteNoise.start();
+
+ const windSource=
+  audioCtx.createBufferSource();
+
+ windSource.buffer=
+  noiseBuffer;
+
+ windSource.loop=true;
+
+ const windFilter=
+  audioCtx.createBiquadFilter();
+
+ windFilter.type="bandpass";
+
+ windFilter.frequency.setValueAtTime(
+  280,
+  audioCtx.currentTime
+ );
+
+ windFilter.Q.setValueAtTime(
+  1.8,
+  audioCtx.currentTime
+ );
+
+ const windGain=
+  audioCtx.createGain();
+
+ windGain.gain.setValueAtTime(
+  .12,
+  audioCtx.currentTime
+ );
+
+ const windLFO=
+  audioCtx.createOscillator();
+
+ windLFO.frequency.setValueAtTime(
+  .12,
+  audioCtx.currentTime
+ );
+
+ const windLFOGain=
+  audioCtx.createGain();
+
+ windLFOGain.gain.setValueAtTime(
+  150,
+  audioCtx.currentTime
+ );
+
+ windLFO.connect(
+  windLFOGain
+ );
+
+ windLFOGain.connect(
+  windFilter.frequency
+ );
+
+ windLFO.start();
+
+ windSource.connect(windFilter);
+ windFilter.connect(windGain);
+ windGain.connect(masterGain);
+
+ windSource.start();
+
+ isPlaying=true;
+
+ hud.textContent=
+  "GOLDEN NOSTALGIC PLAIN — ENVIRONMENT AWAKENED";
+
+ scheduleDrone();
+ scheduleMelody();
+ scheduleChords();
+
+ ensureRainAudio();
+
+ if(rainTarget>.5){
+  setRainAudioTarget(true);
+ }
+}
+
+function scheduleDrone(){
+ if(!isPlaying)return;
+
+ const osc=
+  audioCtx.createOscillator();
+
+ const filter=
+  audioCtx.createBiquadFilter();
+
+ const gain=
+  audioCtx.createGain();
+
+ const baseFreq=
+  scaleFrequencies[
+   Math.floor(
+    Math.random()*5
+   )
+  ];
+
+ osc.type=
+  Math.random()>.5
+   ? "sine"
+   : "triangle";
+
+ osc.frequency.setValueAtTime(
+  baseFreq,
+  audioCtx.currentTime
+ );
+
+ const lfo=
+  audioCtx.createOscillator();
+
+ const lfoGain=
+  audioCtx.createGain();
+
+ lfo.frequency.setValueAtTime(
+  .2+
+  Math.random()*.3,
+  audioCtx.currentTime
+ );
+
+ lfoGain.gain.setValueAtTime(
+  1.5,
+  audioCtx.currentTime
+ );
+
+ lfo.connect(lfoGain);
+ lfoGain.connect(osc.frequency);
+ lfo.start();
+
+ filter.type="lowpass";
+
+ filter.frequency.setValueAtTime(
+  300+Math.random()*250,
+  audioCtx.currentTime
+ );
+
+ const duration=
+  12+
+  Math.random()*10;
+
+ gain.gain.setValueAtTime(
+  .001,
+  audioCtx.currentTime
+ );
+
+ gain.gain.linearRampToValueAtTime(
+  .12,
+  audioCtx.currentTime+4
+ );
+
+ gain.gain.linearRampToValueAtTime(
+  .001,
+  audioCtx.currentTime+duration
+ );
+
+ osc.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+
+ osc.start();
+
+ osc.stop(
+  audioCtx.currentTime+duration
+ );
+
+ lfo.stop(
+  audioCtx.currentTime+duration
+ );
+
+ let t=setTimeout(
+  scheduleDrone,
+  (duration-3)*1000
+ );
+
+ timers.push(t);
+}
+
+function scheduleMelody(){
+ if(!isPlaying)return;
+
+ const osc=
+  audioCtx.createOscillator();
+
+ const gain=
+  audioCtx.createGain();
+
+ const filter=
+  audioCtx.createBiquadFilter();
+
+ const melodyStart=4;
+
+ const melodyEnd=
+  scaleFrequencies.length-1;
+
+ const noteIndex=
+  melodyStart+
+  Math.floor(
+   Math.random()*
+   (
+    melodyEnd-
+    melodyStart+
+    1
+   )
+  );
+
+ const note=
+  scaleFrequencies[noteIndex];
+
+ osc.type="sine";
+
+ osc.frequency.setValueAtTime(
+  note,
+  audioCtx.currentTime
+ );
+
+ filter.type="bandpass";
+
+ filter.frequency.setValueAtTime(
+  note*1.5,
+  audioCtx.currentTime
+ );
+
+ filter.Q.setValueAtTime(
+  2,
+  audioCtx.currentTime
+ );
+
+ const duration=
+  2+
+  Math.random()*4;
+
+ gain.gain.setValueAtTime(
+  .001,
+  audioCtx.currentTime
+ );
+
+ gain.gain.linearRampToValueAtTime(
+  .06,
+  audioCtx.currentTime+.8
+ );
+
+ gain.gain.exponentialRampToValueAtTime(
+  .0001,
+  audioCtx.currentTime+duration
+ );
+
+ const delay=
+  audioCtx.createDelay();
+
+ delay.delayTime.setValueAtTime(
+  .35,
+  audioCtx.currentTime
+ );
+
+ const feedback=
+  audioCtx.createGain();
+
+ feedback.gain.setValueAtTime(
+  .4,
+  audioCtx.currentTime
+ );
+
+ osc.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+
+ gain.connect(delay);
+ delay.connect(feedback);
+ feedback.connect(delay);
+ delay.connect(masterGain);
+
+ osc.start();
+
+ osc.stop(
+  audioCtx.currentTime+duration
+ );
+
+ let nextTime=
+  1500+
+  Math.random()*3500;
+
+ let t=setTimeout(
+  scheduleMelody,
+  nextTime
+ );
+
+ timers.push(t);
+}
+
+function scheduleChords(){
+ if(!isPlaying)return;
+
+ const chordNotes=[
+  scaleFrequencies[
+   Math.floor(Math.random()*8)
+  ],
+
+  scaleFrequencies[
+   Math.floor(Math.random()*8)+2
+  ],
+
+  scaleFrequencies[
+   Math.floor(Math.random()*8)+4
+  ]
+ ];
+
+ chordNotes.forEach(
+  freq=>{
+   const osc=
+    audioCtx.createOscillator();
+
+   const gain=
+    audioCtx.createGain();
+
+   const filter=
+    audioCtx.createBiquadFilter();
+
+   osc.type="triangle";
+
+   osc.frequency.setValueAtTime(
+    freq,
+    audioCtx.currentTime
+   );
+
+   filter.type="lowpass";
+
+   filter.frequency.setValueAtTime(
+    600,
+    audioCtx.currentTime
+   );
+
+   const duration=
+    6+
+    Math.random()*6;
+
+   gain.gain.setValueAtTime(
+    .001,
+    audioCtx.currentTime
+   );
+
+   gain.gain.linearRampToValueAtTime(
+    .04,
+    audioCtx.currentTime+2
+   );
+
+   gain.gain.linearRampToValueAtTime(
+    .001,
+    audioCtx.currentTime+duration
+   );
+
+   osc.connect(filter);
+   filter.connect(gain);
+   gain.connect(masterGain);
+
+   osc.start();
+
+   osc.stop(
+    audioCtx.currentTime+duration
+   );
+  }
+ );
+
+ let t=setTimeout(
+  scheduleChords,
+  7000+
+  Math.random()*6000
+ );
+
+ timers.push(t);
+}
+
+function ensureRainAudio(){
+ if(
+  !audioCtx||
+  !masterGain||
+  rainGainNode
+ ){
+  return;
+ }
+
+ const bufferSize=
+  audioCtx.sampleRate*2;
+
+ const buf=
+  audioCtx.createBuffer(
+   1,
+   bufferSize,
+   audioCtx.sampleRate
+  );
+
+ const data=
+  buf.getChannelData(0);
+
+ for(
+  let i=0;
+  i<bufferSize;
+  i++
+ ){
+  data[i]=
+   Math.random()*2-1;
+ }
+
+ const src=
+  audioCtx.createBufferSource();
+
+ src.buffer=buf;
+ src.loop=true;
+
+ const filter=
+  audioCtx.createBiquadFilter();
+
+ filter.type="bandpass";
+
+ filter.frequency.setValueAtTime(
+  3200,
+  audioCtx.currentTime
+ );
+
+ filter.Q.setValueAtTime(
+  .6,
+  audioCtx.currentTime
+ );
+
+ const gain=
+  audioCtx.createGain();
+
+ gain.gain.setValueAtTime(
+  .0001,
+  audioCtx.currentTime
+ );
+
+ src.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+
+ src.start();
+
+ rainGainNode=gain;
+}
+
+function setRainAudioTarget(active){
+ if(!audioCtx)return;
+
+ ensureRainAudio();
+
+ if(!rainGainNode)return;
+
+ const now=
+  audioCtx.currentTime;
+
+ rainGainNode.gain.cancelScheduledValues(
+  now
+ );
+
+ rainGainNode.gain.setValueAtTime(
+  Math.max(
+   .0001,
+   rainGainNode.gain.value
+  ),
+  now
+ );
+
+ rainGainNode.gain.exponentialRampToValueAtTime(
+  active
+   ? .22
+   : .0001,
+  now+3
+ );
+}
+
+function scheduleThunder(){
+ if(thunderTimer){
+  clearTimeout(thunderTimer);
+  thunderTimer=null;
+ }
+
+ if(rainTarget<.5)return;
+
+ const delay=
+  6000+
+  Math.random()*14000;
+
+ thunderTimer=
+  setTimeout(
+   ()=>{
+    playThunder();
+    scheduleThunder();
+   },
+   delay
+  );
+}
+
+function playThunder(){
+ if(
+  !audioCtx||
+  !masterGain
+ )return;
+
+ const now=
+  audioCtx.currentTime;
+
+ const fade=
+  document.getElementById("fade");
+
+ fade.style.transition=
+  "background-color 0.08s ease-out";
+
+ fade.style.backgroundColor=
+  "rgba(255,255,255,.32)";
+
+ setTimeout(
+  ()=>{
+   fade.style.backgroundColor=
+    "transparent";
+  },
+  90+Math.random()*70
+ );
+
+ const bufferSize=
+  Math.floor(
+   audioCtx.sampleRate*1.6
+  );
+
+ const buf=
+  audioCtx.createBuffer(
+   1,
+   bufferSize,
+   audioCtx.sampleRate
+  );
+
+ const data=
+  buf.getChannelData(0);
+
+ for(
+  let i=0;
+  i<bufferSize;
+  i++
+ ){
+  data[i]=
+   (Math.random()*2-1)*
+   Math.exp(
+    -i/
+    (bufferSize*.28)
+   );
+ }
+
+ const src=
+  audioCtx.createBufferSource();
+
+ src.buffer=buf;
+
+ const filter=
+  audioCtx.createBiquadFilter();
+
+ filter.type="lowpass";
+
+ filter.frequency.setValueAtTime(
+  170+
+  Math.random()*130,
+  now
+ );
+
+ const gain=
+  audioCtx.createGain();
+
+ gain.gain.setValueAtTime(
+  .0001,
+  now
+ );
+
+ gain.gain.exponentialRampToValueAtTime(
+  .5,
+  now+.05
+ );
+
+ gain.gain.exponentialRampToValueAtTime(
+  .0001,
+  now+2.2
+ );
+
+ src.connect(filter);
+ filter.connect(gain);
+ gain.connect(masterGain);
+
+ src.start();
+}
+
+window.nostalgicRain=
+ function(state){
+  if(typeof state==="undefined"){
+   state=
+    rainTarget<.5;
+  }
+
+  rainTarget=
+   state
+    ? 1
+    : 0;
+
+  if(state){
+   if(!isPlaying){
+    startEnvironmentAudio();
+   }
+
+   setRainAudioTarget(true);
+
+   scheduleThunder();
+
+   hud.textContent=
+    "NOSTALGIC RAIN — THE SKY REMEMBERS...";
+  }else{
+   setRainAudioTarget(false);
+
+   scheduleThunder();
+
+   hud.textContent=
+    "GOLDEN NOSTALGIC PLAIN — ENVIRONMENT AWAKENED";
+  }
+
+  return(
+   "Nostalgic Rain: "+
+   (state?"ON":"OFF")
+  );
+ };
+
+[
+ "pointerdown",
+ "keydown"
+].forEach(
+ evt=>{
+  window.addEventListener(
+   evt,
+   ()=>{
+    if(!isPlaying){
+     startEnvironmentAudio();
+    }
+   },
+   {once:true}
+  );
+ }
+);
+
+const DAY_CYCLE_DURATION=100.0;
+
+const keyframes=[
+ {
+  t:0.00,
+  skyTop:[.12,.08,.22],
+  skyHorizon:[.88,.38,.15],
+  sunColor:[1.00,.50,.15],
+  moonColor:[.4,.5,.7],
+  cloudColor:[.85,.45,.35],
+  fogColor:[.75,.35,.20],
+  ambient:[.50,.35,.25],
+  night:.1
+ },
+
+ {
+  t:.12,
+  skyTop:[.03,.04,.10],
+  skyHorizon:[.12,.08,.18],
+  sunColor:[.80,.30,.10],
+  moonColor:[.5,.65,.85],
+  cloudColor:[.22,.18,.28],
+  fogColor:[.10,.08,.15],
+  ambient:[.22,.20,.28],
+  night:.7
+ },
+
+ {
+  t:.27,
+  skyTop:[.01,.02,.05],
+  skyHorizon:[.03,.05,.12],
+  sunColor:[.10,.15,.25],
+  moonColor:[.6,.75,.95],
+  cloudColor:[.08,.12,.18],
+  fogColor:[.03,.05,.10],
+  ambient:[.12,.14,.22],
+  night:1.0
+ },
+
+ {
+  t:.42,
+  skyTop:[.06,.08,.20],
+  skyHorizon:[.45,.20,.25],
+  sunColor:[.85,.40,.18],
+  moonColor:[.5,.6,.7],
+  cloudColor:[.38,.25,.32],
+  fogColor:[.32,.18,.22],
+  ambient:[.28,.22,.28],
+  night:.5
+ },
+
+ {
+  t:.52,
+  skyTop:[.20,.30,.55],
+  skyHorizon:[.95,.60,.35],
+  sunColor:[1.00,.72,.35],
+  moonColor:[.4,.5,.6],
+  cloudColor:[.90,.68,.52],
+  fogColor:[.80,.52,.38],
+  ambient:[.68,.52,.42],
+  night:0.0
+ },
+
+ {
+  t:.73,
+  skyTop:[.16,.40,.85],
+  skyHorizon:[.55,.75,.95],
+  sunColor:[1.00,.96,.85],
+  moonColor:[.3,.4,.5],
+  cloudColor:[.95,.95,.98],
+  fogColor:[.58,.72,.88],
+  ambient:[.85,.85,.82],
+  night:0.0
+ },
+
+ {
+  t:.90,
+  skyTop:[.20,.35,.68],
+  skyHorizon:[.85,.58,.32],
+  sunColor:[1.00,.72,.32],
+  moonColor:[.3,.4,.5],
+  cloudColor:[.92,.72,.52],
+  fogColor:[.75,.55,.38],
+  ambient:[.78,.62,.48],
+  night:0.0
+ },
+
+ {
+  t:1.00,
+  skyTop:[.12,.08,.22],
+  skyHorizon:[.88,.38,.15],
+  sunColor:[1.00,.50,.15],
+  moonColor:[.4,.5,.7],
+  cloudColor:[.85,.45,.35],
+  fogColor:[.75,.35,.20],
+  ambient:[.50,.35,.25],
+  night:.1
+ }
+];
+
+function lerp(a,b,f){
+ return a+(b-a)*f;
+}
+
+function lerpVec3(a,b,f){
+ return [
+  lerp(a[0],b[0],f),
+  lerp(a[1],b[1],f),
+  lerp(a[2],b[2],f)
+ ];
+}
+
+function getEnvironmentState(cycleTime){
+ let idx=0;
+
+ for(
+  let i=0;
+  i<keyframes.length-1;
+  i++
+ ){
+  if(
+   cycleTime>=keyframes[i].t&&
+   cycleTime<keyframes[i+1].t
+  ){
+   idx=i;
+   break;
+  }
+ }
+
+ const k1=keyframes[idx];
+ const k2=keyframes[idx+1];
+
+ const factor=
+  (cycleTime-k1.t)/
+  (k2.t-k1.t);
+
+ const smoothF=
+  factor*
+  factor*
+  (3.0-2.0*factor);
+
+ const sunAngle=
+  (cycleTime-.52)*
+  Math.PI*2.0;
+
+ const sunY=
+  Math.sin(sunAngle);
+
+ const sunX=
+  Math.cos(sunAngle);
+
+ const sunZ=.35;
+
+ const len=
+  Math.hypot(
+   sunX,
+   sunY,
+   sunZ
+  );
+
+ const sunDir=[
+  sunX/len,
+  sunY/len,
+  sunZ/len
+ ];
+
+ const moonDir=[
+  -sunDir[0],
+  -sunDir[1],
+  -sunDir[2]
+ ];
+
+ return {
+  skyTop:
+   lerpVec3(
+    k1.skyTop,
+    k2.skyTop,
+    smoothF
+   ),
+
+  skyHorizon:
+   lerpVec3(
+    k1.skyHorizon,
+    k2.skyHorizon,
+    smoothF
+   ),
+
+  sunColor:
+   lerpVec3(
+    k1.sunColor,
+    k2.sunColor,
+    smoothF
+   ),
+
+  moonColor:
+   lerpVec3(
+    k1.moonColor,
+    k2.moonColor,
+    smoothF
+   ),
+
+  cloudColor:
+   lerpVec3(
+    k1.cloudColor,
+    k2.cloudColor,
+    smoothF
+   ),
+
+  fogColor:
+   lerpVec3(
+    k1.fogColor,
+    k2.fogColor,
+    smoothF
+   ),
+
+  ambient:
+   lerpVec3(
+    k1.ambient,
+    k2.ambient,
+    smoothF
+   ),
+
+  nightFactor:
+   lerp(
+    k1.night,
+    k2.night,
+    smoothF
+   ),
+
+  sunDir,
+  moonDir
+ };
+}
+
+function getTimePhaseName(cycleTime){
+ if(
+  cycleTime>=.92||
+  cycleTime<.08
+ ){
+  return "SUNSET";
+ }
+
+ if(
+  cycleTime>=.08&&
+  cycleTime<.20
+ ){
+  return "NIGHT";
+ }
+
+ if(
+  cycleTime>=.20&&
+  cycleTime<.35
+ ){
+  return "MIDNIGHT";
+ }
+
+ if(
+  cycleTime>=.35&&
+  cycleTime<.48
+ ){
+  return "DAWN / SUNRISE";
+ }
+
+ if(
+  cycleTime>=.48&&
+  cycleTime<.65
+ ){
+  return "MORNING";
+ }
+
+ if(
+  cycleTime>=.65&&
+  cycleTime<.82
+ ){
+  return "NOON";
+ }
+
+ return "AFTERNOON";
+}
+
+let elapsed=0;
+let previous=performance.now();
+
+let frames=0;
+let fpsTime=performance.now();
+
+function render(now){
+ requestAnimationFrame(render);
+
+ const dt=
+  Math.min(
+   .033,
+   Math.max(
+    .001,
+    (now-previous)/1000
+   )
+  );
+
+ previous=now;
+ elapsed+=dt;
+
+ rainAmount+=
+  (
+   rainTarget-rainAmount
+  )*
+  Math.min(
+   1,
+   dt*.6
+  );
+
+ /*
+  * Load chunks BEFORE movement.
+  * This makes collision data available around the player.
+  */
+ updateChunks();
+
+ updatePlayer(dt);
+
+ const cp=Math.cos(pitch);
+
+ const tx=
+  playerX+
+  Math.sin(yaw)*cp;
+
+ const ty=
+  playerY+
+  Math.sin(pitch);
+
+ const tz=
+  playerZ+
+  Math.cos(yaw)*cp;
+
+ const view=
+  viewMatrix(
+   playerX,
+   playerY,
+   playerZ,
+   tx,
+   ty,
+   tz
+  );
+
+ const cycleTime=
+  (
+   elapsed%
+   DAY_CYCLE_DURATION
+  )/
+  DAY_CYCLE_DURATION;
+
+ const env=
+  getEnvironmentState(
+   cycleTime
+  );
+
+ const fogColor=[
+  lerp(
+   env.fogColor[0],
+   .18,
+   rainAmount*.65
+  ),
+
+  lerp(
+   env.fogColor[1],
+   .20,
+   rainAmount*.65
+  ),
+
+  lerp(
+   env.fogColor[2],
+   .24,
+   rainAmount*.65
+  )
+ ];
+
+
+ gl.disable(gl.DEPTH_TEST);
+
+ gl.useProgram(skyProgram);
+
+ gl.bindVertexArray(skyVAO);
+
+ gl.uniformMatrix4fv(
+  skyU.view,
+  false,
+  view
+ );
+
+ gl.uniformMatrix4fv(
+  skyU.proj,
+  false,
+  projection
+ );
+
+ gl.uniform1f(
+  skyU.time,
+  elapsed
+ );
+
+ gl.uniform1f(
+  skyU.rain,
+  rainAmount
+ );
+
+ gl.uniform3fv(
+  skyU.skyTop,
+  env.skyTop
+ );
+
+ gl.uniform3fv(
+  skyU.skyHorizon,
+  env.skyHorizon
+ );
+
+ gl.uniform3fv(
+  skyU.sunDir,
+  env.sunDir
+ );
+
+ gl.uniform3fv(
+  skyU.sunColor,
+  env.sunColor
+ );
+
+ gl.uniform3fv(
+  skyU.moonDir,
+  env.moonDir
+ );
+
+ gl.uniform3fv(
+  skyU.moonColor,
+  env.moonColor
+ );
+
+ gl.uniform3fv(
+  skyU.cloudColor,
+  env.cloudColor
+ );
+
+ gl.uniform1f(
+  skyU.nightFactor,
+  env.nightFactor
+ );
+
+ gl.drawArrays(
+  gl.TRIANGLE_STRIP,
+  0,
+  4
+ );
+
+ gl.bindVertexArray(null);
+
+ gl.enable(gl.DEPTH_TEST);
+
+
+ for(const ch of active.values()){
+  const ccx=
+   (ch.cx+.5)*CHUNK;
+
+  const ccz=
+   (ch.cz+.5)*CHUNK;
+
+  const dx=
+   ccx-playerX;
+
+  const dz=
+   ccz-playerZ;
+
+  if(
+   dx*dx+
+   dz*dz>
+   250*250
+  ){
+   continue;
+  }
+
+
+  gl.useProgram(
+   terrainProgram
+  );
+
+  gl.uniformMatrix4fv(
+   terrainU.view,
+   false,
+   view
+  );
+
+  gl.uniformMatrix4fv(
+   terrainU.proj,
+   false,
+   projection
+  );
+
+  gl.uniform3fv(
+   terrainU.fog,
+   fogColor
+  );
+
+  gl.uniform3fv(
+   terrainU.ambient,
+   env.ambient
+  );
+
+  gl.uniform3fv(
+   terrainU.sunColor,
+   env.sunColor
+  );
+
+  gl.uniform3fv(
+   terrainU.sunDir,
+   env.sunDir
+  );
+
+  gl.bindVertexArray(
+   ch.terrainVAO
+  );
+
+  gl.drawElements(
+   gl.TRIANGLES,
+   ch.terrainIndexCount,
+   gl.UNSIGNED_SHORT,
+   0
+  );
+
+  gl.bindVertexArray(null);
+
+
+  if(ch.stoneCount){
+   gl.useProgram(
+    stoneProgram
+   );
+
+   gl.uniformMatrix4fv(
+    stoneU.view,
+    false,
+    view
+   );
+
+   gl.uniformMatrix4fv(
+    stoneU.proj,
+    false,
+    projection
+   );
+
+   gl.uniform3fv(
+    stoneU.fog,
+    fogColor
+   );
+
+   gl.uniform3fv(
+    stoneU.ambient,
+    env.ambient
+   );
+
+   gl.uniform3fv(
+    stoneU.sunColor,
+    env.sunColor
+   );
+
+   gl.bindVertexArray(
+    ch.stoneVAO
+   );
+
+   gl.drawArraysInstanced(
+    gl.TRIANGLES,
+    0,
+    pebbleVerts.length/3,
+    ch.stoneCount
+   );
+
+   gl.bindVertexArray(null);
+  }
+
+
+  if(ch.flowerCount){
+   gl.useProgram(
+    flowerProgram
+   );
+
+   gl.uniformMatrix4fv(
+    flowerU.view,
+    false,
+    view
+   );
+
+   gl.uniformMatrix4fv(
+    flowerU.proj,
+    false,
+    projection
+   );
+
+   gl.uniform3fv(
+    flowerU.fog,
+    fogColor
+   );
+
+   gl.uniform3fv(
+    flowerU.ambient,
+    env.ambient
+   );
+
+   gl.uniform3fv(
+    flowerU.sunColor,
+    env.sunColor
+   );
+
+   gl.bindVertexArray(
+    ch.flowerVAO
+   );
+
+   gl.drawArraysInstanced(
+    gl.TRIANGLES,
+    0,
+    6,
+    ch.flowerCount
+   );
+
+   gl.bindVertexArray(null);
+  }
+
+
+  if(
+   ch.pineCount||
+   ch.oakCount
+  ){
+   gl.useProgram(
+    treeProgram
+   );
+
+   gl.uniformMatrix4fv(
+    treeU.view,
+    false,
+    view
+   );
+
+   gl.uniformMatrix4fv(
+    treeU.proj,
+    false,
+    projection
+   );
+
+   gl.uniform1f(
+    treeU.time,
+    elapsed
+   );
+
+   gl.uniform3fv(
+    treeU.fog,
+    fogColor
+   );
+
+   gl.uniform3fv(
+    treeU.ambient,
+    env.ambient
+   );
+
+   gl.uniform3fv(
+    treeU.sunColor,
+    env.sunColor
+   );
+
+   gl.uniform3fv(
+    treeU.sunDir,
+    env.sunDir
+   );
+
+   if(
+    ch.pineCount&&
+    ch.pineVAO
+   ){
+    gl.bindVertexArray(
+     ch.pineVAO
+    );
+
+    gl.drawArraysInstanced(
+     gl.TRIANGLES,
+     0,
+     pineMesh.vertexCount,
+     ch.pineCount
+    );
+   }
+
+   if(
+    ch.oakCount&&
+    ch.oakVAO
+   ){
+    gl.bindVertexArray(
+     ch.oakVAO
+    );
+
+    gl.drawArraysInstanced(
+     gl.TRIANGLES,
+     0,
+     oakMesh.vertexCount,
+     ch.oakCount
+    );
+   }
+
+   gl.bindVertexArray(null);
+  }
+
+
+  if(ch.grassCount){
+   gl.useProgram(
+    grassProgram
+   );
+
+   gl.uniformMatrix4fv(
+    grassU.view,
+    false,
+    view
+   );
+
+   gl.uniformMatrix4fv(
+    grassU.proj,
+    false,
+    projection
+   );
+
+   gl.uniform1f(
+    grassU.time,
+    elapsed
+   );
+
+   gl.uniform3fv(
+    grassU.fog,
+    fogColor
+   );
+
+   gl.uniform3fv(
+    grassU.ambient,
+    env.ambient
+   );
+
+   gl.uniform3fv(
+    grassU.sunColor,
+    env.sunColor
+   );
+
+   gl.uniform3fv(
+    grassU.sunDir,
+    env.sunDir
+   );
+
+   gl.bindVertexArray(
+    ch.grassVAO
+   );
+
+   gl.disable(
+    gl.CULL_FACE
+   );
+
+   gl.drawArraysInstanced(
+    gl.TRIANGLES,
+    0,
+    grassVerts.length/3,
+    ch.grassCount
+   );
+
+   gl.bindVertexArray(null);
+  }
+ }
+
+
+ if(rainAmount>.001){
+  gl.enable(gl.BLEND);
+
+  gl.blendFunc(
+   gl.SRC_ALPHA,
+   gl.ONE_MINUS_SRC_ALPHA
+  );
+
+  gl.depthMask(false);
+
+  gl.useProgram(
+   splashProgram
+  );
+
+  gl.uniformMatrix4fv(
+   splashU.view,
+   false,
+   view
+  );
+
+  gl.uniformMatrix4fv(
+   splashU.proj,
+   false,
+   projection
+  );
+
+  gl.uniform1f(
+   splashU.time,
+   elapsed
+  );
+
+  gl.uniform3f(
+   splashU.player,
+   playerX,
+   playerY,
+   playerZ
+  );
+
+  gl.uniform1f(
+   splashU.rain,
+   rainAmount
+  );
+
+  gl.uniform3fv(
+   splashU.ambient,
+   env.ambient
+  );
+
+  gl.bindVertexArray(
+   splashVAO
+  );
+
+  gl.drawArraysInstanced(
+   gl.TRIANGLES,
+   0,
+   SPLASH_PETALS*3,
+   RAIN_COUNT
+  );
+
+  gl.bindVertexArray(null);
+
+  gl.useProgram(
+   rainProgram
+  );
+
+  gl.uniformMatrix4fv(
+   rainU.view,
+   false,
+   view
+  );
+
+  gl.uniformMatrix4fv(
+   rainU.proj,
+   false,
+   projection
+  );
+
+  gl.uniform1f(
+   rainU.time,
+   elapsed
+  );
+
+  gl.uniform3f(
+   rainU.player,
+   playerX,
+   playerY,
+   playerZ
+  );
+
+  gl.uniform1f(
+   rainU.rain,
+   rainAmount
+  );
+
+  gl.uniform3fv(
+   rainU.ambient,
+   env.ambient
+  );
+
+  gl.bindVertexArray(
+   rainVAO
+  );
+
+  gl.drawArraysInstanced(
+   gl.LINES,
+   0,
+   2,
+   RAIN_COUNT
+  );
+
+  gl.bindVertexArray(null);
+
+  gl.depthMask(true);
+
+  gl.disable(gl.BLEND);
+ }
+
+ frames++;
+}
+
+setInterval(
+ ()=>{
+  const now=performance.now();
+
+  const fps=
+   Math.round(
+    frames*
+    1000/
+    Math.max(
+     1,
+     now-fpsTime
+    )
+   );
+
+  frames=0;
+  fpsTime=now;
+
+  if(isPlaying){
+   const cycleTime=
+    (
+     elapsed%
+     DAY_CYCLE_DURATION
+    )/
+    DAY_CYCLE_DURATION;
+
+   const currentBiome=
+    biomeNameAt(
+     playerX,
+     playerZ
+    );
+
+   let loadedTrees=0;
+
+   for(const ch of active.values()){
+    loadedTrees+=
+     ch.pineCount+
+     ch.oakCount;
+   }
+
+   hud.innerHTML=
+    "Infinite Plain — [ "+
+    getTimePhaseName(cycleTime)+
+    " ]"+
+    "<br>LOCATION: "+
+    currentBiome+
+    "<br>WASD / ARROWS • DRAG LOOK • SPACE JUMP"+
+    "<br>"+
+    fps+
+    " FPS • "+
+    active.size+
+    " TERRAIN CHUNKS"+
+    " • "+
+    loadedTrees.toLocaleString()+
+    " LOADED TREES"+
+    " • "+
+    generatedGrass.toLocaleString()+
+    " GRASS";
+  }
+ },
+ 500
+);
+
+requestAnimationFrame(render);
+
+let rainTimer=null;
+
+function randomNostalgicRain(){
+ if(rainTimer){
+  clearTimeout(rainTimer);
+ }
+
+ const delay=
+  300000+
+  Math.random()*300000; // 5–10 minutes
+
+ rainTimer=
+  setTimeout(
+   ()=>{
+    nostalgicRain();
+    randomNostalgicRain();
+   },
+   delay
+  );
+}
+
+randomNostalgicRain();
+
+</script>
+</body>
+</html>
